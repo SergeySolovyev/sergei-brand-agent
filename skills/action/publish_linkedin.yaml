@@ -1,0 +1,177 @@
+# Skill: publish_linkedin
+# Used by: Action layer — browser-driven LinkedIn post publication.
+# Always Tier 3 (human approval required).
+
+name: publish_linkedin
+version: 1.0.0
+description: |
+  Publish an approved LinkedIn draft via Browser-Use. Uses authenticated
+  session (cookies persisted in encrypted volume). Always requires
+  explicit /approve verdict from Sergei via Telegram bot before firing.
+
+  Captures screenshot of published post for audit trail. Records URL.
+
+audience: agent-internal
+category: action
+estimated_duration_seconds: 60
+estimated_cost_usd: 0.05-0.15   # browser-use LLM driver tokens
+
+inputs:
+  - name: draft_path
+    type: filepath
+    required: true
+  - name: include_first_comment
+    type: boolean
+    default: true
+    description: "If draft frontmatter has first_comment, post as own reply"
+
+outputs:
+  - name: post_url
+    type: string
+
+tools_required:
+  - browser-use
+  - filesystem
+  - sqlite
+  - secret:LINKEDIN_SESSION_COOKIES   # OAuth-equivalent; loaded into browser context
+
+procedure:
+  - step: "Idempotency check"
+    action: sqlite_query
+    query: "SELECT post_url FROM published WHERE draft_path = :draft_path AND channel = 'linkedin'"
+    capture: existing
+  - step: "Skip if already published"
+    action: return
+    when: "existing is not None"
+    value: { skipped: true, reason: "already_published", existing: "{{ existing }}" }
+
+  - step: "Verify Critic PASS"
+    action: sqlite_query
+    query: "SELECT verdict FROM critic_verdicts WHERE draft_path = :draft_path ORDER BY ts DESC LIMIT 1"
+    capture: critic_verdict
+  - step: "Refuse if no PASS"
+    action: return
+    when: "critic_verdict is None or critic_verdict.verdict != 'PASS'"
+    value: { skipped: true, reason: "no_critic_pass" }
+
+  - step: "Verify human /approve"
+    action: sqlite_query
+    query: |
+      SELECT approver, ts FROM approvals
+      WHERE draft_path = :draft_path AND verdict = 'approved'
+      ORDER BY ts DESC LIMIT 1
+    capture: approval
+  - step: "Refuse if no approval"
+    action: return
+    when: "approval is None"
+    value: { skipped: true, reason: "awaiting_human_approval" }
+
+  - step: "Read draft body"
+    action: python_inline
+    code: |
+      raw = read_file(inputs.draft_path)
+      if raw.startswith("---"):
+          _, fm, body = raw.split("---", 2)
+          frontmatter = yaml.safe_load(fm)
+      else:
+          body, frontmatter = raw, {}
+      body = body.strip()
+      if len(body) > 3000:
+          raise ValueError(f"LinkedIn body too long: {len(body)} > 3000 chars (post limit)")
+      state.set("draft_body", body)
+      state.set("draft_meta", frontmatter)
+
+  - step: "Browser-Use: publish on LinkedIn"
+    action: browser_use
+    cookies_file: "/workspace/secrets/linkedin_cookies.json"
+    task: |
+      Open https://www.linkedin.com/feed/.
+      Click the "Start a post" button at the top of the feed.
+      Wait for the post composer modal.
+      Click the post composer text area.
+      Type the following body verbatim (preserve all line breaks and hashtags
+      exactly; do NOT add anything; do NOT reformat):
+
+      ---BEGIN POST BODY---
+      {{ draft_body }}
+      ---END POST BODY---
+
+      Confirm the character count display shows <= 3000.
+      Click "Post" button.
+      Wait for confirmation toast / redirect to feed.
+      Capture the post URL by clicking the "•••" menu on the most recent
+      post and selecting "Copy link to post". Read URL from clipboard or
+      from the modal that appears.
+      Return the post URL as the final result.
+    timeout_seconds: 180
+    capture: lkin_result
+
+  - step: "Capture screenshot of published post"
+    action: browser_use
+    task: |
+      Navigate to {{ lkin_result.post_url }}. Take a full-page screenshot.
+      Save to /workspace/data/audit/linkedin_{{ now_unix }}.png.
+    timeout_seconds: 30
+
+  - step: "Post first comment if specified"
+    action: browser_use
+    when: "inputs.include_first_comment and draft_meta.get('first_comment')"
+    task: |
+      You are on the post page. Find the "Add a comment" field and click it.
+      Type:
+      ---BEGIN COMMENT---
+      {{ draft_meta.first_comment }}
+      ---END COMMENT---
+      Click "Post" or "Comment". Confirm comment appears.
+    timeout_seconds: 60
+
+  - step: "Record publication"
+    action: sqlite_exec
+    query: |
+      INSERT INTO published
+      (draft_path, channel, post_url, screenshot_path, published_at, approver)
+      VALUES (:draft_path, 'linkedin', :post_url, :screenshot, :now, :approver)
+    bind:
+      post_url: "{{ lkin_result.post_url }}"
+      screenshot: "/workspace/data/audit/linkedin_{{ now_unix }}.png"
+      approver: "{{ approval.approver }}"
+
+  - step: "Notify Sergei via Telegram"
+    action: http_post
+    url: "https://api.telegram.org/bot{{ secret.TELEGRAM_BOT_TOKEN }}/sendMessage"
+    json:
+      chat_id: "{{ env.TELEGRAM_HOME_CHANNEL }}"
+      text: |
+        ✅ Published to LinkedIn
+        {{ lkin_result.post_url }}
+        Approved by: {{ approval.approver }}
+      parse_mode: Markdown
+
+  - step: "Return"
+    action: return
+    value:
+      published: true
+      post_url: "{{ lkin_result.post_url }}"
+
+error_handling:
+  - on: browser_use_timeout
+    action: log_error_escalate
+    notify: telegram
+    message: "LinkedIn publish timed out — UI may have changed. Manual check required."
+  - on: browser_use_blocked
+    action: pause_skill
+    duration_minutes: 60
+    notify: telegram
+    message: "LinkedIn blocked our session — likely rate-limit or captcha. Will retry in 1h."
+  - on: linkedin_captcha
+    action: escalate_to_rentahuman
+    skill: rentahuman_solve_captcha
+    fallback: pause_skill
+    duration_minutes: 360
+
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.linkedin_publishes_today >= 1   # max 1/day to avoid algo throttling
+  - skip_if: state.last_linkedin_publish_hours_ago < 24
+
+tier: 3   # always human-approved

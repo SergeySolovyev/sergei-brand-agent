@@ -1,0 +1,193 @@
+# Skill: scan_cfp_calls
+# Used by: Strategist (weekly) — find conferences/workshops/journals open for submission
+# aligned with Sergei's research. Output → Composer (writes proposal drafts).
+
+name: scan_cfp_calls
+version: 1.0.0
+description: |
+  Aggregate CFPs (Call-For-Papers) and submission deadlines across
+  AI/ML/DeFi/security/finance venues. Sources: AI Deadlines aggregator,
+  WikiCFP, arXiv listings, dblp, easychair active CFPs, Russian sources.
+
+  Match score uses overlap between Sergei's topics (RAG, smart contracts,
+  LOB, document AI, MCDM) and CFP scope.
+
+audience: agent-internal
+category: discovery
+estimated_duration_seconds: 150
+estimated_cost_usd: 0.00-0.20
+
+inputs:
+  - name: max_deadline_days
+    type: integer
+    default: 120
+  - name: min_deadline_days
+    type: integer
+    default: 7
+  - name: tracks_of_interest
+    type: list[string]
+    default:
+      - "Trustworthy ML"
+      - "Security & Privacy"
+      - "Financial AI"
+      - "Quantitative Finance"
+      - "Smart Contracts"
+      - "Document Understanding"
+      - "RAG"
+      - "Retrieval"
+      - "Evaluation"
+      - "AgentAI"
+      - "Decentralized AI"
+  - name: venue_quality_min
+    type: string
+    default: "B"
+    description: A*, A, B, C — minimum (CORE/CCF rank)
+  - name: include_russian_journals
+    type: boolean
+    default: true
+
+outputs:
+  - name: cfps
+    type: list
+
+tools_required:
+  - http
+  - browser-use
+  - sqlite
+
+procedure:
+  - step: "Seen-set init"
+    action: sqlite_query
+    query: "SELECT url FROM cfp_calls WHERE first_seen > date('now', '-120 days')"
+    capture: seen_urls
+
+  - step: "AI Deadlines aggregator (curated YAML)"
+    action: http_get
+    url: "https://raw.githubusercontent.com/abhshkdz/ai-deadlines/main/_data/conferences.yml"
+    capture: ai_deadlines
+    parse: yaml
+
+  - step: "WikiCFP for security/finance categories"
+    action: browser_use
+    task: |
+      Visit http://www.wikicfp.com/cfp/call?conference=security and
+      http://www.wikicfp.com/cfp/call?conference=finance.
+      For each CFP listing (max 40 per page): title, venue, deadline,
+      where (city), URL. JSON output.
+    capture: wikicfp
+    timeout_seconds: 90
+
+  - step: "easychair active conferences"
+    action: browser_use
+    task: |
+      Visit https://easychair.org/cfp/. List 50 active CFPs.
+      Extract title, deadline, URL, brief topic description.
+    capture: easychair_cfps
+    timeout_seconds: 60
+
+  - step: "Russian journals (eLibrary + Naukaru)"
+    action: browser_use
+    when: inputs.include_russian_journals
+    task: |
+      Visit https://www.elibrary.ru/projects/calls/conference_calls.asp.
+      List open conferences (Nov 2026 onward) with deadline, theme, URL.
+      Filter to themes: ИТ, безопасность, финансы, ИИ, блокчейн, машинное обучение.
+    capture: ru_calls
+    timeout_seconds: 60
+
+  - step: "Normalize and score"
+    action: python_inline
+    code: |
+      from datetime import datetime, timedelta
+      now = datetime.utcnow()
+      max_d = now + timedelta(days=inputs.max_deadline_days)
+      min_d = now + timedelta(days=inputs.min_deadline_days)
+      cfps = []
+      tracks_lower = [t.lower() for t in inputs.tracks_of_interest]
+
+      def add(title, venue, deadline_iso, url, scope_text="", rank=None, source=""):
+          if not url or url in seen_urls:
+              return
+          try:
+              d = datetime.fromisoformat(deadline_iso[:19])
+          except Exception:
+              return
+          if not (min_d <= d <= max_d):
+              return
+          haystack = (title + " " + scope_text).lower()
+          matched = [t for t in tracks_lower if t in haystack]
+          if not matched and source != "wikicfp_security":
+              # be slightly lenient for security venue (we want them all)
+              return
+          # quality gate
+          rank_order = {"A*": 4, "A": 3, "B": 2, "C": 1, None: 1}
+          if rank is not None and rank_order.get(rank, 0) < rank_order.get(inputs.venue_quality_min, 2):
+              return
+          cfps.append({
+              "title": title.strip()[:300],
+              "venue": venue,
+              "deadline": deadline_iso,
+              "url": url,
+              "rank": rank,
+              "matched_tracks": matched,
+              "match_score": min(1.0, len(matched) * 0.33),
+              "scope_brief": scope_text[:500],
+              "source": source,
+              "first_seen": now.isoformat(),
+          })
+
+      for c in ai_deadlines:
+          add(c.get("title", c.get("name", "")),
+              c.get("name", ""),
+              c.get("deadline", ""),
+              c.get("link", c.get("website", "")),
+              c.get("note", ""), c.get("rank"), "ai_deadlines")
+
+      for c in (wikicfp or []):
+          add(c["title"], c["venue"], c["deadline"], c["url"], "", None, "wikicfp")
+
+      for c in (easychair_cfps or []):
+          add(c["title"], c.get("title", ""), c["deadline"], c["url"],
+              c.get("topic", ""), None, "easychair")
+
+      for c in (ru_calls or []):
+          add(c["title"], "RU venue", c["deadline"], c["url"],
+              c.get("theme", ""), "B", "ru_elibrary")
+
+  - step: "Persist"
+    action: sqlite_exec
+    query: |
+      INSERT INTO cfp_calls
+      (title, venue, deadline, url, rank, match_score, raw_json, first_seen)
+      VALUES (:title, :venue, :deadline, :url, :rank, :match_score, :raw_json, :first_seen)
+      ON CONFLICT(url) DO NOTHING
+    rows: cfps
+
+  - step: "Emit Strategist events for top matches"
+    action: sqlite_exec
+    when: "any(c['match_score'] >= 0.66 for c in cfps)"
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts, raw)
+      VALUES ('discovery', 'cfp_high_match', :subject, 'medium', :now, :raw)
+    bind:
+      subject: "{{ len([c for c in cfps if c['match_score'] >= 0.66]) }} high-match CFPs"
+      raw: "{{ sorted([c for c in cfps if c['match_score'] >= 0.66], key=lambda x: x['deadline'])[:5] | json }}"
+
+  - step: "Return top 20"
+    action: return
+    value:
+      total: "{{ len(cfps) }}"
+      cfps: "{{ sorted(cfps, key=lambda x: (-x['match_score'], x['deadline']))[:20] }}"
+
+error_handling:
+  - on: http_4xx
+    action: log_warn_continue
+  - on: browser_use_timeout
+    action: log_warn_continue
+  - on: yaml_parse_error
+    action: log_error_continue
+
+cron: "0 7 * * 1"   # Mondays 07:00 UTC, after grants/hackathons
+
+guards:
+  - skip_if: state.emergency_pause == true

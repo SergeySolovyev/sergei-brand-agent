@@ -1,0 +1,152 @@
+# Skill: publish_x_thread
+# Tier 3 — always human-approved.
+
+name: publish_x_thread
+version: 1.0.0
+description: |
+  Publish an approved X (Twitter) thread via Browser-Use. Posts tweet 1,
+  then each subsequent tweet as a reply to the previous. Captures the
+  thread URL.
+
+  Auth method: persistent cookies (refreshed manually quarterly).
+  No paid X API needed — Browser-Use drives the standard web UI.
+
+audience: agent-internal
+category: action
+estimated_duration_seconds: 90
+estimated_cost_usd: 0.08-0.20
+
+inputs:
+  - name: draft_path
+    type: filepath
+    required: true
+
+outputs:
+  - name: thread_url
+    type: string
+  - name: tweet_ids
+    type: list[string]
+
+tools_required:
+  - browser-use
+  - filesystem
+  - sqlite
+  - secret:X_SESSION_COOKIES
+
+procedure:
+  - step: "Idempotency + approval gates"
+    action: gate_chain
+    checks:
+      - sqlite_query: |
+          SELECT post_url FROM published WHERE draft_path = :draft_path AND channel = 'x'
+        skip_if_found: { reason: "already_published" }
+      - sqlite_query: |
+          SELECT verdict FROM critic_verdicts WHERE draft_path = :draft_path ORDER BY ts DESC LIMIT 1
+        require: "verdict == 'PASS'"
+        skip_otherwise: { reason: "no_critic_pass" }
+      - sqlite_query: |
+          SELECT verdict FROM approvals WHERE draft_path = :draft_path AND verdict = 'approved'
+        require: "rows > 0"
+        skip_otherwise: { reason: "awaiting_human_approval" }
+
+  - step: "Parse draft into tweets array"
+    action: python_inline
+    code: |
+      import re
+      raw = read_file(inputs.draft_path)
+      _, fm, body = raw.split("---", 2)
+      frontmatter = yaml.safe_load(fm)
+      tweets = re.findall(r"^\d+/\s*(.+?)$", body, re.MULTILINE)
+      if not tweets:
+          raise ValueError("No '1/', '2/', ... tweets found in draft")
+      for i, t in enumerate(tweets, 1):
+          if len(t) > 280:
+              raise ValueError(f"Tweet {i} is {len(t)} chars > 280")
+      state.set("tweets", tweets)
+      state.set("frontmatter", frontmatter)
+
+  - step: "Browser-Use: post the thread"
+    action: browser_use
+    cookies_file: "/workspace/secrets/x_cookies.json"
+    task: |
+      Open https://x.com/home.
+      Click "Post" button at the top.
+
+      Tweet array (post them in order, with each subsequent tweet as a
+      REPLY/continuation of the previous within the same thread):
+
+      {{ tweets | json }}
+
+      For tweet 1:
+        - Click the post composer.
+        - Type tweet 1 verbatim (preserve all line breaks).
+        - Click "+" or "Add another post" button to extend the thread.
+      For tweets 2..N:
+        - Type each into the new composer field.
+        - For N: click "Post all" to publish the full thread.
+
+      After publishing, capture:
+        - The URL of tweet 1 (root of the thread)
+        - The numeric IDs of all tweets (look at /username/status/<id>)
+      Return JSON: { thread_url, tweet_ids }
+    timeout_seconds: 240
+    capture: x_result
+
+  - step: "Screenshot of root tweet"
+    action: browser_use
+    task: |
+      Navigate to {{ x_result.thread_url }}. Wait for thread to load.
+      Take full-page screenshot. Save to
+      /workspace/data/audit/x_thread_{{ now_unix }}.png.
+    timeout_seconds: 30
+
+  - step: "Record publication"
+    action: sqlite_exec
+    query: |
+      INSERT INTO published
+      (draft_path, channel, post_url, screenshot_path, published_at)
+      VALUES (:draft_path, 'x', :thread_url, :screenshot, :now)
+    bind:
+      thread_url: "{{ x_result.thread_url }}"
+      screenshot: "/workspace/data/audit/x_thread_{{ now_unix }}.png"
+
+  - step: "Notify Sergei"
+    action: http_post
+    url: "https://api.telegram.org/bot{{ secret.TELEGRAM_BOT_TOKEN }}/sendMessage"
+    json:
+      chat_id: "{{ env.TELEGRAM_HOME_CHANNEL }}"
+      text: |
+        ✅ X thread published
+        {{ x_result.thread_url }}
+        {{ len(tweets) }} tweets
+
+  - step: "Return"
+    action: return
+    value:
+      published: true
+      thread_url: "{{ x_result.thread_url }}"
+      tweet_ids: "{{ x_result.tweet_ids }}"
+
+error_handling:
+  - on: browser_use_timeout
+    action: log_error_escalate
+    notify: telegram
+  - on: browser_use_blocked
+    action: pause_skill
+    duration_minutes: 120
+    notify: telegram
+  - on: x_rate_limit
+    action: sleep_and_retry
+    sleep_seconds: 900   # 15 min
+  - on: x_captcha
+    action: escalate_to_rentahuman
+    skill: rentahuman_solve_captcha
+    fallback: pause_skill
+    duration_minutes: 360
+
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.x_publishes_today >= 1     # max 1 thread/day
+  - skip_if: state.last_x_publish_hours_ago < 18
+
+tier: 3   # always human-approve

@@ -1,0 +1,243 @@
+# Skill: scan_hackathons
+# Used by: Strategist (weekly) — identifies hackathon opportunities for visibility,
+# prize money, and code-portfolio additions.
+# Compatible with: agentskills.io v0.1 schema
+
+name: scan_hackathons
+version: 1.0.0
+description: |
+  Discover upcoming hackathons aligned with Sergei's portfolio (DeFi,
+  smart contracts, AI/ML, ZK, RAG). Polls ETHGlobal, Devpost, DoraHacks,
+  Encode Club calendars + Russian sources (Yandex Cup, T-Bank, MTS).
+
+  Filters by: alignment with skill stack, prize pool, remote vs in-person,
+  registration deadline. Emits high-match events for Strategist.
+
+audience: agent-internal
+category: discovery
+estimated_duration_seconds: 120
+estimated_cost_usd: 0.00
+
+inputs:
+  - name: max_days_until_start
+    type: integer
+    default: 90
+    description: Skip events starting more than N days out
+  - name: max_days_until_registration_close
+    type: integer
+    default: 60
+  - name: keyword_seeds
+    type: list[string]
+    default:
+      - DeFi
+      - smart contract
+      - ZK
+      - RAG
+      - AI agent
+      - blockchain
+      - Solidity
+      - account abstraction
+      - intent
+      - MEV
+  - name: prize_threshold_usd
+    type: integer
+    default: 5000
+    description: Skip events with total prize pool below this
+  - name: include_russian
+    type: boolean
+    default: true
+
+outputs:
+  - name: events
+    type: list
+    description: |
+      [
+        {
+          name, organizer, url, start_date, end_date, registration_deadline,
+          format (online|hybrid|in-person), location,
+          prize_pool_usd, tracks: [], sponsor_chains: [],
+          alignment_score (0-1),  # heuristic, no LLM
+          matched_keywords: [],
+          why_attend: short string (e.g. "Match: smart contracts, AI agents; Prize: $200k; Remote")
+        }
+      ]
+
+tools_required:
+  - browser-use
+  - http
+  - sqlite
+
+procedure:
+  - step: "Initialize seen-set"
+    action: sqlite_query
+    query: "SELECT url FROM hackathon_events WHERE first_seen > date('now', '-60 days')"
+    capture: seen_urls
+
+  - step: "Fetch ETHGlobal upcoming"
+    action: http_get
+    url: "https://ethglobal.com/api/v1/events?status=upcoming"
+    capture: ethglobal_events
+
+  - step: "Browser-tour Devpost AI/blockchain filter"
+    action: browser_use
+    task: |
+      Navigate to https://devpost.com/hackathons?length[]=2-7-days&themes[]=Blockchain&themes[]=Machine%20Learning&order_by=submission-deadline.
+      Read first 30 active hackathons. For each: name, organizer, URL,
+      submission deadline, prize pool, themes, format (online/in-person).
+      Return JSON array.
+    capture: devpost_events
+    timeout_seconds: 90
+
+  - step: "Fetch DoraHacks open competitions"
+    action: http_get
+    url: "https://dorahacks.io/api/hackathon/list?status=ongoing&page=1&page_size=30"
+    capture: dorahacks_events
+
+  - step: "Browser-tour Encode Club calendar"
+    action: browser_use
+    task: |
+      Navigate to https://www.encode.club/events. List all upcoming events
+      (next 90 days) and bootcamps. For each: name, dates, URL, format,
+      brief description, sponsors. Return as JSON array.
+    capture: encode_events
+    timeout_seconds: 60
+
+  - step: "Russian sources (optional)"
+    action: browser_use
+    when: inputs.include_russian
+    task: |
+      Visit https://it-events.com/events?type=hackathon and
+      https://hackathon.com/russia. Combine results. For each upcoming
+      Russian hackathon related to blockchain/AI/finance: name, organizer,
+      date, URL, prize pool (in RUB and convert ~$ approximate). JSON output.
+    capture: ru_events
+    timeout_seconds: 90
+
+  - step: "Aggregate, normalize, filter"
+    action: python_inline
+    code: |
+      from datetime import datetime, timedelta
+      now = datetime.utcnow()
+      events = []
+
+      def add(name, organizer, url, start_date, end_date, registration_deadline,
+              format, location, prize_pool_usd, tracks, sponsor_chains, source):
+          if not url or url in seen_urls:
+              return
+          # parse dates
+          try:
+              s = datetime.fromisoformat(start_date.replace("Z", ""))
+              if s < now:
+                  return  # already started/ended
+              if (s - now).days > inputs.max_days_until_start:
+                  return
+          except Exception:
+              return
+          if registration_deadline:
+              try:
+                  rd = datetime.fromisoformat(registration_deadline.replace("Z", ""))
+                  if (rd - now).days > inputs.max_days_until_registration_close:
+                      return
+                  if rd < now:
+                      return  # registration closed
+              except Exception:
+                  pass
+          # prize filter
+          if prize_pool_usd and prize_pool_usd < inputs.prize_threshold_usd:
+              return
+          # keyword alignment
+          haystack = (name + " " + " ".join(tracks or []) + " " + " ".join(sponsor_chains or [])).lower()
+          matched = [k for k in inputs.keyword_seeds if k.lower() in haystack]
+          alignment = min(1.0, len(matched) * 0.25)  # 0.25 per matched keyword, cap 1.0
+          if alignment < 0.25:
+              return
+          why = f"Match: {', '.join(matched[:3])}; Prize ${prize_pool_usd or 0:,}; {format or 'unknown'}"
+          events.append({
+              "name": name.strip()[:200],
+              "organizer": organizer,
+              "url": url,
+              "start_date": start_date,
+              "end_date": end_date,
+              "registration_deadline": registration_deadline,
+              "format": format,
+              "location": location,
+              "prize_pool_usd": prize_pool_usd or 0,
+              "tracks": tracks or [],
+              "sponsor_chains": sponsor_chains or [],
+              "matched_keywords": matched,
+              "alignment_score": alignment,
+              "why_attend": why,
+              "source": source,
+              "first_seen": now.isoformat(),
+          })
+
+      for e in (ethglobal_events or {}).get("data", []):
+          add(e["name"], "ETHGlobal", e["url"], e["startDate"], e.get("endDate"),
+              e.get("registrationDeadline"), e.get("format"), e.get("location"),
+              e.get("prizePoolUSD", 0), e.get("tracks", []),
+              e.get("sponsorChains", []), "ethglobal")
+
+      for e in (devpost_events or []):
+          add(e["name"], e.get("organizer", "Devpost"), e["url"],
+              e.get("start_date"), e.get("end_date"),
+              e.get("submission_deadline"), e.get("format"), e.get("location"),
+              e.get("prize_pool_usd", 0), e.get("themes", []), [], "devpost")
+
+      for e in (dorahacks_events or {}).get("results", []):
+          add(e["name"], "DoraHacks", e["url"], e["start_at"], e["end_at"],
+              e.get("registration_deadline"), "online", e.get("location"),
+              e.get("prize_total", 0), e.get("tracks", []),
+              e.get("chains", []), "dorahacks")
+
+      for e in (encode_events or []):
+          add(e["name"], "Encode Club", e["url"], e["start_date"], e.get("end_date"),
+              e.get("registration_deadline"), e.get("format"), "",
+              e.get("prize_pool_usd", 0), e.get("topics", []), [], "encode")
+
+      for e in (ru_events or []):
+          add(e["name"], e.get("organizer", ""), e["url"], e["start_date"],
+              e.get("end_date"), e.get("registration_deadline"),
+              e.get("format", "in-person"), e.get("location", "Russia"),
+              e.get("prize_pool_usd", 0), e.get("tracks", []),
+              [], "ru_aggregator")
+
+  - step: "Persist to state.sqlite"
+    action: sqlite_exec
+    query: |
+      INSERT INTO hackathon_events
+      (name, organizer, url, start_date, alignment_score, prize_pool_usd, raw_json, first_seen)
+      VALUES (:name, :organizer, :url, :start_date, :alignment_score, :prize_pool_usd, :raw_json, :first_seen)
+      ON CONFLICT(url) DO NOTHING
+    rows: events
+
+  - step: "Emit Strategist events for high-alignment matches"
+    action: sqlite_exec
+    when: "any(e['alignment_score'] >= 0.5 and e['prize_pool_usd'] >= 25000 for e in events)"
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts, raw)
+      VALUES ('discovery', 'hackathon_high_match', :subject, 'high', :now, :raw)
+    bind:
+      subject: "{{ len([e for e in events if e['alignment_score'] >= 0.5]) }} aligned hackathons"
+      raw: "{{ [e for e in events if e['alignment_score'] >= 0.5] | json }}"
+
+  - step: "Return"
+    action: return
+    value:
+      total: "{{ len(events) }}"
+      high_alignment: "{{ len([e for e in events if e['alignment_score'] >= 0.5]) }}"
+      events: "{{ sorted(events, key=lambda e: (-e['alignment_score'], -e['prize_pool_usd']))[:20] }}"
+
+error_handling:
+  - on: http_4xx
+    action: log_warn_continue
+  - on: http_5xx
+    action: retry_with_backoff
+    max_retries: 2
+  - on: browser_use_timeout
+    action: log_warn_continue
+
+cron: "0 6 * * 1"   # Mondays 06:00 UTC, alongside scan_grants
+
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.daily_browser_use_minutes > 30

@@ -1,0 +1,122 @@
+# Skill: compose_x_thread
+# Used by: Composer (X sub-persona) — drafts X/Twitter threads.
+
+name: compose_x_thread
+version: 1.0.0
+description: |
+  Draft a 5-10 tweet X (Twitter) thread in English. Hook-first style:
+  first tweet must stop the scroll without clickbait. Technical depth
+  appropriate for DeFi/AI engineering audience.
+
+  Tier 3 — always requires human approval before browser-driven publish
+  (X is high-stakes for commercial brand; mistakes are screen-shotted).
+
+audience: agent-internal
+category: composition
+estimated_duration_seconds: 40
+estimated_cost_usd: 0.03-0.07
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+  - name: hook_angle
+    type: string
+    description: |
+      One of: "counterintuitive_finding" | "tactical_takeaway" | "framework" |
+      "before_after" | "case_study"
+    default: "counterintuitive_finding"
+  - name: source_links
+    type: list[url]
+    default: []
+  - name: max_tweets
+    type: integer
+    default: 8
+
+outputs:
+  - name: draft_path
+    type: filepath
+
+tools_required:
+  - filesystem
+  - sqlite
+  - llm:claude-sonnet-4-5
+
+procedure:
+  - step: "Load context"
+    action: read_files
+    paths:
+      - knowledge_base/identity.json
+      - knowledge_base/preprints.json
+      - knowledge_base/brand_voice_corpus.md
+      - personas/composer.md
+
+  - step: "Read 5 reference X threads from voice corpus"
+    action: read_section
+    file: knowledge_base/brand_voice_corpus.md
+    section: "X / Twitter samples"
+    max_samples: 5
+
+  - step: "Compose"
+    action: llm_call
+    persona: composer
+    sub_persona: x_thread
+    model: claude-sonnet-4-5
+    system_prompt_file: personas/composer.md
+    user_prompt: |
+      Channel: X (Twitter)
+      Topic: {{ inputs.topic }}
+      Hook angle: {{ inputs.hook_angle }}
+      Max tweets: {{ inputs.max_tweets }}
+
+      Format requirements:
+      - Tweet 1 (HOOK): max 240 chars. Stop the scroll without clickbait.
+        Examples of strong hooks:
+          - "Naïve RAG made my Solidity vuln detector worse, not better."
+          - "I shipped a $0 ERC-4626 yield vault that beat 3 audited ones."
+          - "Why my LOB mid-price predictor refuses to use volume features."
+      - Tweets 2-N: each 240-280 chars. One idea per tweet.
+      - Tweet N (close): call-to-action (read full paper / open repo).
+      - No emoji unless content-essential.
+      - No "🚨", "🔥", "✨" decorations.
+      - No "RT if useful" / "follow for more".
+
+      Output Markdown with frontmatter:
+      ---
+      channel: x_thread
+      tweet_count: N
+      char_counts: [list]
+      hook_used: ...
+      links_in_thread: [...]
+      composer_concerns: [...]
+      ---
+
+      Then a numbered list of tweets, each prefixed "1/" "2/" etc.
+
+  - step: "Validate char counts"
+    action: python_inline
+    code: |
+      import re
+      content = read_file(draft_path)
+      tweets = re.findall(r"^\d+/\s*(.+?)$", content, re.MULTILINE)
+      overflow = [(i+1, len(t), t) for i, t in enumerate(tweets) if len(t) > 280]
+      if overflow:
+          raise ValueError(f"Tweets over 280 chars: {overflow}")
+      state.set("last_thread_tweets", tweets)
+
+  - step: "Save draft"
+    action: write_file
+    path: "data/drafts/{{ now_date }}-x_thread-{{ slugify(inputs.topic) }}.md"
+
+  - step: "Emit event"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, tier, ts)
+      VALUES ('composer', 'draft_ready', :draft_path, 'medium', 3, :timestamp)
+
+guards:
+  - skip_if: state.daily_llm_cost_usd > env.DAILY_COST_CAP_USD
+  - skip_if: state.emergency_pause == true
+  - skip_if: x_drafts_pending_approval >= 2
+
+tier: 3   # always human-approved (career impact)

@@ -1,0 +1,197 @@
+# Skill: check_inbound_mentions
+# Used by: Engagement layer (cron every 4 hours) to detect mentions of
+# Sergei across X, LinkedIn, GitHub, Reddit/HN.
+
+name: check_inbound_mentions
+version: 1.0.0
+description: |
+  Search for inbound mentions of Sergei Solovev, his DOIs, and his repo
+  names. Queue each unique mention as a "potential reply" event for the
+  Engagement layer.
+
+  NO-LLM detection (search queries + dedup). Reply drafting happens later
+  in reply_to_mention.yaml.
+
+audience: agent-internal
+category: monitoring
+estimated_duration_seconds: 75
+estimated_cost_usd: 0.00
+
+inputs:
+  - name: query_seeds
+    type: list[string]
+    default:
+      - "Sergei Solovev"
+      - "Sergey Solovyev HSE"
+      - "sergeisolovev.com"
+      - "ai-yield-vault"
+      - "honest-rag-solidity"
+      - "10.6084/m9.figshare.32141182"
+      - "10.6084/m9.figshare.32141167"
+      - "10.6084/m9.figshare.31429971"
+  - name: lookback_hours
+    type: integer
+    default: 6
+    description: "Skip mentions older than this (cron runs every 4h)"
+
+outputs:
+  - name: mentions
+    type: list
+
+tools_required:
+  - http
+  - browser-use
+  - sqlite
+
+procedure:
+  - step: "Init seen-set"
+    action: sqlite_query
+    query: "SELECT mention_url FROM mentions WHERE first_seen > date('now', '-30 days')"
+    capture: seen_urls
+
+  - step: "GitHub: mentions in issues / PRs / discussions"
+    action: http_get
+    url: |
+      https://api.github.com/search/issues?q={{ url_encode(query) }}&sort=created&order=desc&per_page=20
+    headers:
+      Authorization: "Bearer {{ env.GITHUB_TOKEN }}"
+    foreach: query in inputs.query_seeds
+    capture: gh_mentions
+
+  - step: "Reddit search"
+    action: http_get
+    url: "https://www.reddit.com/search.json?q={{ url_encode(query) }}&sort=new&t=week"
+    headers:
+      User-Agent: "sergei-brand-agent (contact: sesesolovev@edu.hse.ru)"
+    foreach: query in inputs.query_seeds
+    capture: reddit_mentions
+
+  - step: "Hacker News (Algolia search)"
+    action: http_get
+    url: "https://hn.algolia.com/api/v1/search_by_date?query={{ url_encode(query) }}&hitsPerPage=20"
+    foreach: query in inputs.query_seeds
+    capture: hn_mentions
+
+  - step: "X mentions via Browser-Use (no API budget)"
+    action: browser_use
+    cookies_file: "/workspace/secrets/x_cookies.json"
+    task: |
+      Visit https://x.com/search?q=%22Sergei+Solovev%22&src=typed_query&f=live
+      and https://x.com/search?q=sergeisolovev.com&src=typed_query&f=live.
+      Read up to 20 results per query. For each: tweet_url, author_handle,
+      tweet_text, ts, follower_count_of_author (visible on profile chip).
+      Return JSON array. Skip retweets without commentary. Skip tweets older
+      than {{ inputs.lookback_hours }} hours.
+    timeout_seconds: 120
+    capture: x_mentions
+
+  - step: "LinkedIn mentions (search Sergei's name on company pages)"
+    action: browser_use
+    cookies_file: "/workspace/secrets/linkedin_cookies.json"
+    task: |
+      Use LinkedIn search to find recent (this-week) posts mentioning
+      "Sergei Solovev" or linking to sergeisolovev.com or any of his
+      figshare DOIs. Capture: post URL, author name, headline, snippet.
+      Return JSON array. Skip Sergei's own posts.
+    timeout_seconds: 90
+    capture: linkedin_mentions
+
+  - step: "Normalize, filter, dedupe"
+    action: python_inline
+    code: |
+      from datetime import datetime, timedelta
+      now = datetime.utcnow()
+      cutoff = now - timedelta(hours=inputs.lookback_hours)
+      mentions = []
+
+      def add(url, platform, author, text, ts_iso, signal_strength="medium"):
+          if not url or url in seen_urls:
+              return
+          try:
+              ts = datetime.fromisoformat(ts_iso.replace("Z", ""))
+              if ts < cutoff:
+                  return
+          except Exception:
+              pass  # missing ts; let it through
+          mentions.append({
+              "mention_url": url,
+              "platform": platform,
+              "author": author,
+              "text_snippet": text[:500],
+              "ts": ts_iso,
+              "signal_strength": signal_strength,
+              "first_seen": now.isoformat(),
+          })
+
+      for batch in gh_mentions or []:
+          for item in batch.get("items", []):
+              add(item["html_url"], "github", item["user"]["login"],
+                  item.get("title", "") + "\n" + (item.get("body", "") or "")[:300],
+                  item["created_at"], "high" if item.get("comments", 0) > 5 else "medium")
+
+      for batch in reddit_mentions or []:
+          for post in batch.get("data", {}).get("children", []):
+              d = post.get("data", {})
+              add(f"https://reddit.com{d['permalink']}", "reddit",
+                  d.get("author"), d.get("title", "") + "\n" + d.get("selftext", "")[:300],
+                  datetime.utcfromtimestamp(d["created_utc"]).isoformat(),
+                  "high" if d.get("score", 0) > 20 else "medium")
+
+      for batch in hn_mentions or []:
+          for hit in batch.get("hits", []):
+              add(f"https://news.ycombinator.com/item?id={hit['objectID']}",
+                  "hn", hit.get("author"), hit.get("title", "") + "\n" + hit.get("story_text", "")[:300],
+                  hit.get("created_at"), "high" if hit.get("points", 0) > 30 else "medium")
+
+      for m in (x_mentions or []):
+          add(m["tweet_url"], "x", m["author_handle"], m["tweet_text"],
+              m.get("ts"), "high" if m.get("follower_count_of_author", 0) > 5000 else "medium")
+
+      for m in (linkedin_mentions or []):
+          add(m["post_url"], "linkedin", m["author"],
+              m.get("snippet", ""), m.get("ts"),
+              "high")  # LinkedIn mentions are always worth attention
+
+  - step: "Persist"
+    action: sqlite_exec
+    query: |
+      INSERT INTO mentions
+      (mention_url, platform, author, text_snippet, signal_strength, ts, first_seen)
+      VALUES (:mention_url, :platform, :author, :text_snippet, :signal_strength, :ts, :first_seen)
+      ON CONFLICT(mention_url) DO NOTHING
+    rows: mentions
+
+  - step: "Emit Engagement events for high-signal mentions"
+    action: sqlite_exec
+    when: "any(m['signal_strength'] == 'high' for m in mentions)"
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts, raw)
+      VALUES ('monitor', 'inbound_mention', :subject, 'medium', :now, :raw)
+    bind:
+      subject: "{{ len([m for m in mentions if m['signal_strength'] == 'high']) }} new high-signal mentions"
+      raw: "{{ [m for m in mentions if m['signal_strength'] == 'high'] | json }}"
+
+  - step: "Return"
+    action: return
+    value:
+      total_new: "{{ len(mentions) }}"
+      high_signal: "{{ len([m for m in mentions if m['signal_strength'] == 'high']) }}"
+      mentions: "{{ mentions }}"
+
+error_handling:
+  - on: http_4xx
+    action: log_warn_continue
+  - on: http_5xx
+    action: retry_with_backoff
+    max_retries: 2
+  - on: browser_use_timeout
+    action: log_warn_continue
+  - on: rate_limit
+    action: sleep_and_retry
+    sleep_seconds: 60
+
+cron: "0 */4 * * *"   # every 4 hours
+
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.daily_api_calls > 800

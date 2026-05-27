@@ -1,0 +1,277 @@
+# Skill: scan_grants
+# Used by: Strategist (weekly) + Composer (when planning content tied to deadlines)
+# Compatible with: agentskills.io v0.1 schema (Hermes Agent native)
+
+name: scan_grants
+version: 1.0.0
+description: |
+  Discover open grant calls relevant to Sergei's research portfolio
+  (DeFi security, RAG evaluation, MCDM, LOB prediction, document AI).
+  Aggregates from EU/RU/ETH/Russian innovation programs. Computes a
+  match score per grant. Persists candidates with deadline and required
+  documents so Composer can pre-fill proposals.
+
+  NO-LLM monitor by default. If `enable_scoring` is true, calls a cheap
+  classifier (Haiku) to score relevance per candidate.
+
+audience: agent-internal
+category: discovery
+estimated_duration_seconds: 180
+estimated_cost_usd: 0.00-0.30   # 0 if scoring off; ~$0.30 if scoring 50 candidates
+
+inputs:
+  - name: keyword_seeds
+    type: list[string]
+    default:
+      - smart contract security
+      - retrieval-augmented generation
+      - decentralized finance
+      - vulnerability detection
+      - blockchain audit
+      - high-frequency finance
+      - document AI
+      - multi-criteria decision making
+  - name: max_deadline_days
+    type: integer
+    default: 180
+    description: Skip grants whose deadline is more than N days away
+  - name: min_deadline_days
+    type: integer
+    default: 14
+    description: Skip grants whose deadline is sooner than N days (insufficient time)
+  - name: enable_scoring
+    type: boolean
+    default: true
+  - name: sources
+    type: list[string]
+    default:
+      - ethereum_foundation
+      - protocol_labs
+      - gitcoin
+      - russian_rscf
+      - rsf_grants
+      - skoltech_calls
+      - eu_horizon
+      - nih_smaller_grants
+
+outputs:
+  - name: candidates
+    type: list
+    description: |
+      List of grant opportunities, each:
+      {
+        title, sponsor, deadline (ISO8601),
+        url, eligibility_brief, amount_usd_range,
+        match_score (0-1) if scoring enabled,
+        required_docs: [list of docs to prepare],
+        seed_keywords_matched: [list]
+      }
+
+tools_required:
+  - browser-use            # for sites that block raw HTTP
+  - http                    # for JSON/RSS endpoints
+  - sqlite                  # persist seen-set so we don't re-notify
+  - llm:claude-haiku-4-5    # optional, only if enable_scoring
+
+procedure:
+  - step: "Initialize seen-set from state.sqlite"
+    action: sqlite_query
+    query: "SELECT url FROM grant_candidates WHERE first_seen > date('now', '-90 days')"
+    capture: seen_urls
+
+  - step: "Fetch Ethereum Foundation Academic Grants RSS"
+    action: http_get
+    url: "https://blog.ethereum.org/category/academic-grants/feed/"
+    capture: ef_feed
+    when: "'ethereum_foundation' in inputs.sources"
+
+  - step: "Fetch Gitcoin grants quadratic-funding rounds"
+    action: http_get
+    url: "https://grants-stack-indexer.gitcoin.co/v1/data/rounds?limit=50"
+    capture: gitcoin_rounds
+    when: "'gitcoin' in inputs.sources"
+
+  - step: "Browser-tour RSCF (Russian Science Foundation) call page"
+    action: browser_use
+    task: |
+      Navigate to https://rscf.ru/contests. List all open competitions.
+      For each: extract title, deadline, eligibility (фрагмент about who can apply),
+      funding amount, URL of full call page. Return as JSON array.
+    when: "'russian_rscf' in inputs.sources"
+    timeout_seconds: 60
+    capture: rscf_calls
+
+  - step: "Browser-tour Skoltech open calls"
+    action: browser_use
+    task: |
+      Navigate to https://skoltech.ru/research. Find open research grants/calls.
+      Skip past events. Return open ones with title, deadline, URL.
+    when: "'skoltech_calls' in inputs.sources"
+    timeout_seconds: 60
+    capture: skoltech_calls
+
+  - step: "Fetch Horizon Europe AI/blockchain calls"
+    action: http_get
+    url: "https://ec.europa.eu/info/funding-tenders/opportunities/data/referenceData/grants.json?frameworkProgramme=43108390&topicAreaCode=10"
+    capture: horizon_calls
+    when: "'eu_horizon' in inputs.sources"
+
+  - step: "Fetch Protocol Labs grant calls"
+    action: http_get
+    url: "https://api.protocol.ai/grants/open"
+    capture: protocol_labs_calls
+    when: "'protocol_labs' in inputs.sources"
+
+  - step: "Aggregate, normalize, filter"
+    action: python_inline
+    code: |
+      from datetime import datetime, timedelta
+      out = []
+      now = datetime.utcnow()
+      max_d = now + timedelta(days=inputs.max_deadline_days)
+      min_d = now + timedelta(days=inputs.min_deadline_days)
+
+      def add(title, sponsor, deadline_iso, url, brief="", amount="", eligibility=""):
+          try:
+              d = datetime.fromisoformat(deadline_iso.replace("Z", ""))
+          except Exception:
+              return
+          if not (min_d <= d <= max_d):
+              return
+          if url in seen_urls:
+              return
+          # keyword match
+          haystack = (title + " " + brief + " " + eligibility).lower()
+          matched = [k for k in inputs.keyword_seeds if k.lower() in haystack]
+          if not matched:
+              return
+          out.append({
+              "title": title.strip()[:250],
+              "sponsor": sponsor,
+              "deadline": deadline_iso,
+              "url": url,
+              "eligibility_brief": eligibility[:500],
+              "amount_usd_range": amount,
+              "seed_keywords_matched": matched,
+              "discovered_at": now.isoformat(),
+          })
+
+      for entry in ef_feed.entries[:30]:
+          add(entry.title, "Ethereum Foundation", entry.published,
+              entry.link, entry.summary, "varies", "academic, indep researchers")
+
+      for r in gitcoin_rounds:
+          if r["status"] == "active":
+              add(r["roundMetadata"]["name"], "Gitcoin",
+                  r["donationsEndTime"], r["url"],
+                  r["roundMetadata"]["eligibility"]["description"],
+                  f"matching pool ~${r['matchAmount']/1e6:.0f}k",
+                  r["roundMetadata"]["eligibility"]["requirements"])
+
+      for c in rscf_calls or []:
+          add(c["title"], "РНФ", c["deadline"], c["url"],
+              c.get("eligibility", ""), c.get("amount", ""), "")
+
+      for c in (skoltech_calls or []):
+          add(c["title"], "Сколтех", c["deadline"], c["url"], "", "", "")
+
+      for h in horizon_calls.get("calls", []):
+          add(h["title"], "Horizon Europe", h["deadline"], h["url"],
+              h.get("topicDescription", ""), h.get("budget", ""), "")
+
+      for c in (protocol_labs_calls or []):
+          add(c["title"], "Protocol Labs", c["deadline"], c["url"],
+              c.get("description", ""), c.get("amount", ""), "")
+
+      candidates = out
+
+  - step: "Score relevance (optional)"
+    action: llm_call
+    when: inputs.enable_scoring and len(candidates) > 0
+    persona: classifier
+    model: claude-haiku-4-5
+    system_prompt: |
+      You score grant relevance for Sergei Solovev (HSE FCS researcher,
+      profile in inputs).
+      Score = 0 (irrelevant), 0.3 (loose fit), 0.6 (clear fit), 0.9 (excellent fit).
+      Be conservative.  Output JSON: {url: score}.
+    user_prompt: |
+      Sergei's portfolio: 5 figshare preprints on RAG for Solidity vuln detection,
+      ERC-4626 yield vault with MCDM, LOB DA-BiGRU-CNN, EVM bytecode ML, OCR vs Donut.
+      Score each: {{ candidates | json }}
+    capture: scores
+
+  - step: "Merge scores into candidates"
+    action: python_inline
+    when: inputs.enable_scoring
+    code: |
+      for c in candidates:
+          c["match_score"] = scores.get(c["url"], 0.0)
+      # drop low-score noise
+      candidates = [c for c in candidates if c["match_score"] >= 0.3]
+
+  - step: "Compute required_docs heuristically"
+    action: python_inline
+    code: |
+      DOC_PATTERNS = {
+        "research proposal": ["proposal", "Horizon", "ERC", "RSCF"],
+        "budget justification": ["RSCF", "Horizon", "EU"],
+        "CV (PDF)": ["all"],
+        "publications list (BibTeX)": ["academic", "Horizon", "RSCF"],
+        "letters of support": ["EU", "Skoltech", "RSCF"],
+        "ORCID": ["EU", "Horizon"],
+        "code repository link": ["Ethereum", "Gitcoin", "Protocol"],
+        "preprint links": ["academic", "research"],
+      }
+      for c in candidates:
+          docs = []
+          haystack = (c["title"] + " " + c["sponsor"]).lower()
+          for doc, triggers in DOC_PATTERNS.items():
+              if any(t.lower() in haystack for t in triggers) or "all" in triggers:
+                  docs.append(doc)
+          c["required_docs"] = docs
+
+  - step: "Persist to state.sqlite (events for Strategist)"
+    action: sqlite_exec
+    query: |
+      INSERT INTO grant_candidates
+      (sponsor, title, deadline, url, match_score, required_docs_json, raw_json, first_seen)
+      VALUES (:sponsor, :title, :deadline, :url, :match_score, :required_docs_json, :raw_json, :now)
+      ON CONFLICT(url) DO NOTHING
+    rows: candidates
+
+  - step: "Emit event for Strategist if any high-match candidates"
+    action: sqlite_exec
+    when: "any(c['match_score'] >= 0.6 for c in candidates if 'match_score' in c)"
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts, raw)
+      VALUES ('discovery', 'grant_high_match', :subject, 'high', :now, :raw)
+    bind:
+      subject: "{{ len([c for c in candidates if c['match_score'] >= 0.6]) }} high-match grants found"
+      raw: "{{ candidates | json }}"
+
+  - step: "Return"
+    action: return
+    value:
+      total_candidates: "{{ len(candidates) }}"
+      high_match: "{{ len([c for c in candidates if c.get('match_score', 0) >= 0.6]) }}"
+      candidates: "{{ candidates }}"
+
+error_handling:
+  - on: http_4xx
+    action: log_warn_continue
+  - on: http_5xx
+    action: retry_with_backoff
+    max_retries: 2
+  - on: rate_limit
+    action: sleep_and_retry
+    sleep_seconds: 120
+  - on: browser_use_timeout
+    action: log_warn_continue
+    note: "Site might have changed structure; flag for human review"
+
+cron: "0 6 * * 1"   # Mondays 06:00 UTC (09:00 MSK) — Strategist reads results 09:00
+
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.daily_browser_use_minutes > 30   # cost cap

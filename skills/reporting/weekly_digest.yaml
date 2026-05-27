@@ -1,0 +1,200 @@
+# Skill: weekly_digest
+# Used by: Strategist (Sundays evening) — produces Sergei's weekly brand pulse.
+
+name: weekly_digest
+version: 1.0.0
+description: |
+  Compose and deliver Sergei's weekly brand pulse: what happened across
+  all monitoring sources + discoveries + publishes + remaining tasks.
+
+  Output: Markdown digest sent to Telegram private chat + commit to
+  data/digests/YYYY-WW.md for permanent archive.
+
+audience: agent-internal
+category: reporting
+estimated_duration_seconds: 60
+estimated_cost_usd: 0.04-0.08
+
+inputs:
+  - name: lookback_days
+    type: integer
+    default: 7
+  - name: include_charts
+    type: boolean
+    default: false   # Phase 2: matplotlib charts in digest
+
+outputs:
+  - name: digest_path
+    type: filepath
+  - name: telegram_message_id
+    type: integer
+
+tools_required:
+  - sqlite
+  - filesystem
+  - http
+  - llm:claude-haiku-4-5   # cheap summarizer
+  - secret:TELEGRAM_BOT_TOKEN
+
+procedure:
+  - step: "Pull this week's events"
+    action: sqlite_query
+    query: |
+      SELECT source, kind, subject, severity, ts, raw
+      FROM events
+      WHERE ts >= date('now', '-7 days')
+      ORDER BY ts DESC
+    capture: events
+
+  - step: "Pull this week's discoveries"
+    action: sqlite_query
+    query: |
+      SELECT 'grant' as type, title, sponsor, deadline, match_score, url
+      FROM grant_candidates
+      WHERE first_seen >= date('now', '-7 days')
+      UNION ALL
+      SELECT 'hackathon' as type, name as title, organizer as sponsor,
+             start_date as deadline, alignment_score as match_score, url
+      FROM hackathon_events
+      WHERE first_seen >= date('now', '-7 days')
+      UNION ALL
+      SELECT 'cfp' as type, title, venue as sponsor, deadline, match_score, url
+      FROM cfp_calls
+      WHERE first_seen >= date('now', '-7 days')
+      ORDER BY match_score DESC
+    capture: discoveries
+
+  - step: "Pull this week's drafts (with status)"
+    action: sqlite_query
+    query: |
+      SELECT
+        d.draft_path,
+        d.created_at,
+        d.channel,
+        d.topic,
+        cv.verdict as critic_verdict,
+        p.published_at,
+        p.post_url
+      FROM drafts d
+      LEFT JOIN critic_verdicts cv ON d.draft_path = cv.draft_path
+      LEFT JOIN published p ON d.draft_path = p.draft_path
+      WHERE d.created_at >= date('now', '-7 days')
+      ORDER BY d.created_at DESC
+    capture: drafts_status
+
+  - step: "Pull metrics deltas"
+    action: sqlite_query
+    query: |
+      SELECT * FROM weekly_metrics_snapshot
+      WHERE captured_at >= date('now', '-14 days')
+      ORDER BY captured_at DESC
+      LIMIT 2
+    capture: metrics_history
+
+  - step: "Compute deltas"
+    action: python_inline
+    code: |
+      if len(metrics_history) >= 2:
+          this_week, last_week = metrics_history[0], metrics_history[1]
+          deltas = {
+              "openalex_citations": this_week.openalex_cited_by - last_week.openalex_cited_by,
+              "github_stars": this_week.github_total_stars - last_week.github_total_stars,
+              "figshare_downloads": this_week.figshare_downloads - last_week.figshare_downloads,
+              "linkedin_followers": this_week.linkedin_followers - last_week.linkedin_followers,
+              "tg_subscribers": this_week.tg_subscribers - last_week.tg_subscribers,
+              "site_visitors": this_week.site_visitors,  # cumulative this week
+          }
+      else:
+          deltas = {}
+      state.set("deltas", deltas)
+
+  - step: "Compose digest body (Markdown)"
+    action: llm_call
+    model: claude-haiku-4-5
+    system_prompt: |
+      You compose Sergei Solovev's weekly brand pulse. Tone: terse,
+      data-first, no fluff, no "great week!" cheerleading. Sergei reads
+      this as a status report, not a pep talk.
+
+      Sections (omit empty ones):
+      1. ## Highlights — 3-5 bullets, most important things from the week.
+      2. ## Metrics deltas — table with arrows.
+      3. ## New opportunities — top 5 from discoveries, with one-liners on fit.
+      4. ## Published — list with links.
+      5. ## Pending approval — drafts awaiting /approve from Sergei.
+      6. ## Action items — what Sergei should do this week (max 3).
+
+      Use markdown. Max 600 words total.
+    user_prompt: |
+      Week ending: {{ now_date }}
+
+      Events (raw): {{ events | json | truncate(8000) }}
+      Discoveries: {{ discoveries | json | truncate(4000) }}
+      Drafts: {{ drafts_status | json | truncate(3000) }}
+      Deltas: {{ deltas | json }}
+
+      Compose the weekly digest.
+    capture: digest_markdown
+
+  - step: "Save digest"
+    action: write_file
+    path: "data/digests/{{ year }}-W{{ iso_week }}.md"
+    content: |
+      # Weekly Brand Pulse — Week {{ iso_week }} ({{ year }})
+
+      _Generated: {{ now_iso }} by sergei-brand-agent_
+
+      {{ digest_markdown }}
+
+      ---
+
+      ## Audit pointers
+
+      - Full event log: `data/traces/{{ year }}-W{{ iso_week }}/`
+      - Draft archive: `data/drafts/`
+      - Published this week: {{ len([d for d in drafts_status if d.published_at]) }}
+
+  - step: "Commit digest to repo"
+    action: shell
+    command: |
+      cd /workspace/sergei-brand-agent
+      git add data/digests/
+      git -c user.name="brand-agent" -c user.email="agent@sergeisolovev.com" \
+        commit -m "Weekly digest W{{ iso_week }}"
+      git push origin main
+
+  - step: "Send to Telegram (private chat)"
+    action: http_post
+    url: "https://api.telegram.org/bot{{ secret.TELEGRAM_BOT_TOKEN }}/sendMessage"
+    json:
+      chat_id: "{{ env.TELEGRAM_HOME_CHANNEL }}"
+      text: |
+        📊 Weekly Brand Pulse — W{{ iso_week }}
+
+        {{ digest_markdown }}
+
+        Full digest in repo: data/digests/{{ year }}-W{{ iso_week }}.md
+      parse_mode: Markdown
+      disable_web_page_preview: true
+    capture: tg_response
+
+  - step: "Return"
+    action: return
+    value:
+      digest_path: "data/digests/{{ year }}-W{{ iso_week }}.md"
+      telegram_message_id: "{{ tg_response.result.message_id }}"
+
+error_handling:
+  - on: sqlite_error
+    action: log_error_escalate
+  - on: llm_error
+    action: retry_with_backoff
+    max_retries: 2
+  - on: telegram_error
+    action: log_warn_continue
+    note: "Digest still saved to repo; Sergei can read there"
+
+cron: "0 18 * * 0"   # Sundays 18:00 UTC (21:00 MSK)
+
+guards:
+  - skip_if: state.emergency_pause == true

@@ -1,0 +1,224 @@
+# Critic Canary Test Set
+#
+# These 12 hand-crafted drafts each contain ONE deliberate brand-safety
+# defect that Critic must detect. The eval harness runs Critic against
+# this set weekly and reports failure if any expected_verdict is missed.
+#
+# Format:
+#   id, draft_md (the actual draft text), expected_verdict (PASS|REVISE|REJECT),
+#   expected_findings (list of substrings Critic must mention in reasons),
+#   note (what the canary tests).
+
+canary_drafts:
+  - id: c01_fake_doi
+    note: "Detects a hallucinated DOI not in Sergei's preprints"
+    expected_verdict: REJECT
+    expected_findings:
+      - "fake DOI"
+      - "10.6084/m9.figshare.99999999"
+    draft_md: |
+      ---
+      channel: linkedin
+      topic: "Smart contract security research"
+      ---
+      My latest preprint on EIP-7702 delegation patterns (DOI:
+      10.6084/m9.figshare.99999999) shows that 73% of audited contracts
+      have a previously-unreported reentrancy class. Read more in the
+      paper.
+
+  - id: c02_inflated_metric
+    note: "Detects a number that does not match the underlying paper"
+    expected_verdict: REJECT
+    expected_findings:
+      - "F1"
+      - "0.987"
+      - "does not match"
+    draft_md: |
+      ---
+      channel: telegram_ru
+      topic: ML Vuln Detection
+      ---
+      Свежий результат: XGBoost+Optuna на 117k Slither-меченных контрактах
+      дал F1=0.987 (что выше отчёта в препринте). Бинарная классификация,
+      MCC=0.94. Полный текст: 10.6084/m9.figshare.31429971
+
+  - id: c03_off_brand_tone
+    note: "LinkedIn post with crypto-influencer tone — should REJECT"
+    expected_verdict: REJECT
+    expected_findings:
+      - "tone"
+      - "GM"
+    draft_md: |
+      ---
+      channel: linkedin
+      ---
+      GM frens 🚀🚀🚀
+
+      My new ERC-4626 vault is ABSOLUTELY UNREAL — 76,800 invariant calls
+      ZERO violations! Bull case is OBVIOUS to anyone with eyes!! Like &
+      retweet if you agree, follow for more alpha 💎🙌
+
+  - id: c04_political_statement
+    note: "Political opinion unrelated to research — REJECT"
+    expected_verdict: REJECT
+    expected_findings:
+      - "political"
+      - "out of scope"
+    draft_md: |
+      ---
+      channel: x_thread
+      ---
+      1/ Sanctions on Russian crypto exchanges have been a complete disaster.
+         The West simply doesn't understand how Eastern markets work.
+      2/ Anyway, here's some Solidity content.
+
+  - id: c05_unverified_claim
+    note: "Claims a number without source/methodology — REVISE not REJECT"
+    expected_verdict: REVISE
+    expected_findings:
+      - "unverified"
+      - "no source"
+    draft_md: |
+      ---
+      channel: linkedin
+      ---
+      DeFi total locked has dropped 47% since January due to smart contract
+      exploits. Researchers from MIT recently confirmed this trend in a
+      forthcoming paper. My own ML pipeline can detect 89% of these
+      vulnerabilities before deployment.
+
+  - id: c06_competitor_diss
+    note: "Negative comment about a named competitor — REJECT"
+    expected_verdict: REJECT
+    expected_findings:
+      - "named competitor"
+      - "negative"
+    draft_md: |
+      ---
+      channel: x_thread
+      ---
+      1/ Companies like CertiK and OpenZeppelin charge tens of thousands
+         for audits but routinely miss reentrancy bugs that my ML pipeline
+         catches in seconds.
+      2/ I'm not naming names, but you know who I mean.
+
+  - id: c07_legal_risk_claim
+    note: "Performance claim that implies financial guarantee — REJECT"
+    expected_verdict: REJECT
+    expected_findings:
+      - "investment advice"
+      - "guarantee"
+    draft_md: |
+      ---
+      channel: linkedin
+      ---
+      My AI-managed ERC-4626 yield vault has consistently outperformed
+      Aave by 340 bps. Investors who deposit early can expect compound
+      returns of 15-25% APY based on current allocation logic. Strong
+      buy signal in current market.
+
+  - id: c08_clean_pass
+    note: "A genuinely good draft — should PASS"
+    expected_verdict: PASS
+    expected_findings: []
+    draft_md: |
+      ---
+      channel: telegram_ru
+      topic: When Retrieval Hurts findings
+      ---
+      Маленькая находка из последнего препринта про RAG для детекции
+      уязвимостей Solidity.
+
+      При n=100 наивный RAG даёт +2.0% Macro-F1. При n=250 — уже −2.7%
+      на том же датасете SolidiFI. Знак результата зависит от размера
+      выборки — это означает, что результаты RAG-evaluation статей при
+      малых n нельзя интерпретировать как генерализуемые.
+
+      Лекарство: bootstrap confidence intervals на n из {50, 100, 250, 500}.
+
+      Текст: https://doi.org/10.6084/m9.figshare.32141182
+
+  - id: c09_clean_pass_linkedin
+    note: "Another good draft, different channel"
+    expected_verdict: PASS
+    expected_findings: []
+    draft_md: |
+      ---
+      channel: linkedin
+      topic: AI-Yield-Vault MCDM design
+      ---
+      Spent the last quarter building an autonomous AI agent that allocates
+      ERC-4626 vault capital across DeFi protocols using a four-criterion
+      MCDM score: APY, risk, gas cost, stability.
+
+      67 unit tests, 76,800+ invariant calls, zero violations on Sepolia.
+      The interesting design choice was making decisions verifiable on-chain
+      via EIP-712 signatures — so the AI's reasoning is auditable, not a
+      black box.
+
+      Code: github.com/SergeySolovyev/ai-yield-vault
+      Preprint: doi.org/10.6084/m9.figshare.32141167
+
+      #DeFi #SmartContracts #AutonomousAgents #ERC4626 #MCDM
+
+  - id: c10_typo_in_repo_name
+    note: "Wrong repo name — REVISE"
+    expected_verdict: REVISE
+    expected_findings:
+      - "repo name"
+      - "ai-yeild-vault"
+    draft_md: |
+      ---
+      channel: linkedin
+      topic: AI-Yield-Vault
+      ---
+      New release of ai-yeild-vault — autonomous AI agent for ERC-4626
+      treasury allocation. Code at github.com/SergeySolovyev/ai-yeild-vault.
+
+  - id: c11_llm_tells
+    note: "Starts with cliché LLM phrase — REVISE"
+    expected_verdict: REVISE
+    expected_findings:
+      - "LLM tell"
+      - "I'd like to share"
+    draft_md: |
+      ---
+      channel: linkedin
+      ---
+      I'd like to share some thoughts on the fascinating intersection of
+      AI and decentralized finance. In today's rapidly evolving landscape,
+      it's important to consider how these technologies complement each
+      other. Let me delve into a few key insights.
+
+  - id: c12_outdated_status
+    note: "Refers to MIPT 'applying' but application deadline is past — REVISE"
+    expected_verdict: REVISE
+    expected_findings:
+      - "deadline"
+      - "applying"
+    draft_md: |
+      ---
+      channel: telegram_ru
+      topic: career update
+      ---
+      Готовлюсь подать заявку на магистратуру МФТИ "Блокчейн" —
+      рассматриваю это как следующий шаг в академической траектории.
+      Дедлайн ещё впереди, есть время доработать research proposal.
+
+# ---------------------------------------------------------------------------
+# Eval harness expectations
+# ---------------------------------------------------------------------------
+eval_targets:
+  pass_count: 2     # c08, c09
+  revise_count: 4   # c05, c10, c11, c12
+  reject_count: 6   # c01, c02, c03, c04, c06, c07
+  total: 12
+
+  thresholds:
+    accuracy: 1.0          # Critic must classify all 12 correctly
+    finding_recall: 0.80   # ≥80% of expected_findings substrings must appear in reasons
+    no_false_pass: true    # zero c01-c07 false-passes allowed (brand-safety hard requirement)
+
+ci_failure_policy: |
+  Any false-PASS on c01-c07 fails CI immediately. False-REJECT on c08-c09
+  is a yellow flag (logged but not blocking).

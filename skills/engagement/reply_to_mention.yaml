@@ -1,0 +1,152 @@
+# Skill: reply_to_mention
+# Used by: Engagement layer — when monitoring detects an inbound mention.
+# Drafts a thoughtful reply, queues for human approval (Tier 3).
+
+name: reply_to_mention
+version: 1.0.0
+description: |
+  Compose a reply to an inbound mention on LinkedIn / X / GitHub.
+  Reads the context (parent thread, who mentioned, what they said),
+  drafts a thoughtful reply that adds value (not just acknowledgement).
+
+  ALL replies Tier 3 — engagement carries reputational risk, especially
+  from snark or misreading the tone. Human approves verbatim.
+
+audience: agent-internal
+category: engagement
+estimated_duration_seconds: 35
+estimated_cost_usd: 0.04-0.08
+
+inputs:
+  - name: mention_url
+    type: string
+    required: true
+  - name: platform
+    type: string
+    required: true
+    enum: [linkedin, x, github, telegram]
+  - name: parent_context
+    type: string
+    description: "Optional pre-extracted context (otherwise Browser-Use fetches)"
+  - name: reply_intent
+    type: string
+    default: "add_value"
+    enum: [add_value, clarify, agree_with_nuance, gently_correct, decline_politely, acknowledge_only]
+
+outputs:
+  - name: draft_path
+    type: filepath
+
+tools_required:
+  - browser-use      # to read mention context if not provided
+  - filesystem
+  - sqlite
+  - llm:claude-sonnet-4-5
+
+procedure:
+  - step: "Fetch context if not provided"
+    action: browser_use
+    when: "inputs.parent_context is None"
+    task: |
+      Navigate to {{ inputs.mention_url }}. Read the post/issue/tweet and
+      enough of the surrounding context to understand what was said and
+      what kind of reply is expected. Return:
+      {
+        author: { name, handle, bio_summary, follower_count },
+        parent_text: full text,
+        thread_summary: 1-2 sentence summary of the broader conversation,
+        sentiment: positive | curious | critical | neutral,
+        questions_asked: list of questions (if any)
+      }
+    capture: context
+
+  - step: "Use provided context if available"
+    action: python_inline
+    when: "inputs.parent_context is not None"
+    code: |
+      context = {"parent_text": inputs.parent_context, "thread_summary": ""}
+
+  - step: "Critic-style sanity check on mention"
+    action: llm_call
+    model: claude-haiku-4-5
+    system_prompt: |
+      You decide whether to engage with this mention or skip it.
+      Skip when:
+        - Spam / promotional bait
+        - Hostile / bad-faith tone
+        - Asks for specific paid advice (decline_politely)
+        - Touches political/divisive topics not in Sergei's lane
+
+      Engage when:
+        - Genuine technical question Sergei can answer
+        - Citation of Sergei's work that benefits from contextualization
+        - Researcher introducing themselves / suggesting collaboration
+        - Constructive critique of Sergei's research
+      Output JSON: { engage: bool, reason: str, suggested_intent: <enum> }
+    user_prompt: "{{ context | json }}"
+    capture: engagement_decision
+
+  - step: "Skip if Haiku says no"
+    action: return
+    when: "not engagement_decision.engage"
+    value: { skipped: true, reason: engagement_decision.reason }
+
+  - step: "Draft reply"
+    action: llm_call
+    persona: composer
+    sub_persona: engagement
+    model: claude-sonnet-4-5
+    system_prompt_file: personas/composer.md
+    user_prompt: |
+      Platform: {{ inputs.platform }}
+      Mention: {{ inputs.mention_url }}
+      Parent: {{ context.parent_text }}
+      Thread context: {{ context.thread_summary }}
+      Sentiment: {{ context.sentiment }}
+      Intent: {{ inputs.reply_intent if inputs.reply_intent else engagement_decision.suggested_intent }}
+
+      Write a reply that:
+        - Adds substance (data, link, framework) — not just "great post!"
+        - Matches the parent's tone register (academic vs casual)
+        - Length: LinkedIn 60-150 words, X ≤ 280 chars, GitHub ≤ 200 words
+        - Never starts with "Great question!", "Interesting take!",
+          "Thanks for sharing!" — these read as LLM tells.
+        - Cites a specific Sergei paper/repo when relevant (use exact link).
+
+      Output Markdown with frontmatter:
+      ---
+      platform: ...
+      mention_url: ...
+      reply_intent: ...
+      char_count: N
+      composer_concerns: [...]
+      ---
+
+  - step: "Save draft"
+    action: write_file
+    path: "data/drafts/{{ now_date }}-reply-{{ inputs.platform }}-{{ hash(inputs.mention_url)[:8] }}.md"
+
+  - step: "Emit event (Tier 3 = always human-approve)"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, tier, ts)
+      VALUES ('engagement', 'reply_draft_ready', :draft_path, 'medium', 3, :timestamp)
+
+  - step: "Notify Sergei immediately (engagement is time-sensitive)"
+    action: http_post
+    url: "https://api.telegram.org/bot{{ secret.TELEGRAM_BOT_TOKEN }}/sendMessage"
+    json:
+      chat_id: "{{ env.TELEGRAM_HOME_CHANNEL }}"
+      text: |
+        🔔 Reply draft ready
+        Platform: {{ inputs.platform }}
+        Mention: {{ inputs.mention_url }}
+        Draft: data/drafts/...
+        Reply with /approve {{ draft_id }} or /reject {{ draft_id }}
+      parse_mode: Markdown
+
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.replies_today >= 5   # don't over-engage
+
+tier: 3   # always human-approve

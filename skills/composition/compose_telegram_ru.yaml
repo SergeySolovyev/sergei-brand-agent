@@ -1,0 +1,106 @@
+# Skill: compose_telegram_ru
+# Used by: Composer (Russian sub-persona) — drafts for t.me/sergeisolovev channel.
+
+name: compose_telegram_ru
+version: 1.0.0
+description: |
+  Draft a Russian-language Telegram channel post (100-200 words).
+  Casual but technically precise — Sergei's personal channel voice
+  is "конкретный исследователь, без официоза, со ссылками на источники".
+
+  Goes through Critic review before publish (Tier 2 by default;
+  Tier 1 if explicitly marked low-stakes by Strategist).
+
+audience: agent-internal
+category: composition
+estimated_duration_seconds: 25
+estimated_cost_usd: 0.015-0.04
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+  - name: angle
+    type: string
+    description: "Strategist's framing (e.g. 'why-this-matters' / 'mini-result' / 'reflection')"
+  - name: source_links
+    type: list[url]
+    default: []
+  - name: tier_override
+    type: integer
+    default: 2
+    description: "1 = auto-publish (only for absolute-low-stakes), 2 = critic-gated"
+
+outputs:
+  - name: draft_path
+    type: filepath
+
+tools_required:
+  - filesystem
+  - sqlite
+  - llm:claude-sonnet-4-5
+
+procedure:
+  - step: "Load context"
+    action: read_files
+    paths:
+      - knowledge_base/identity.json
+      - knowledge_base/preprints.json
+      - knowledge_base/glossary.md
+      - personas/composer.md
+
+  - step: "Load 5 recent TG channel samples for voice calibration"
+    action: read_section
+    file: knowledge_base/brand_voice_corpus.md
+    section: "Telegram RU samples"
+    max_samples: 5
+
+  - step: "Compose"
+    action: llm_call
+    persona: composer
+    sub_persona: telegram_ru
+    model: claude-sonnet-4-5
+    system_prompt_file: personas/composer.md
+    user_prompt: |
+      Канал: t.me/sergeisolovev (личный, технический)
+      Тема: {{ inputs.topic }}
+      {{ #inputs.angle }}Угол: {{ inputs.angle }}{{ /inputs.angle }}
+      Длина: 100-200 слов.
+
+      Стилевые требования:
+      - Без приветствий ("Друзья!", "Привет!") и официоза.
+      - Конкретика: 1 число или результат обязательно.
+      - 0-2 эмодзи максимум, и только если уместно (✅ ❌ ⚡, не 🚀💎🔥).
+      - Ссылка на исходник в конце ({{ inputs.source_links }}).
+      - Без MarkdownV2 спецсимволов (— нормальный em-dash, _ только в ссылках).
+      - Не начинай с глагола "Опубликовали" или "Сделали".
+
+      Структура: hook (1 строка) → суть (3-5 строк) → линк.
+
+      Выдать draft в Markdown с фронтматтером:
+      ---
+      channel: telegram_ru
+      topic: ...
+      angle: ...
+      tier: ...
+      composer_concerns: list (что Composer заметил спорного)
+      ---
+
+  - step: "Save draft"
+    action: write_file
+    path: "data/drafts/{{ now_date }}-telegram_ru-{{ slugify(inputs.topic) }}.md"
+
+  - step: "Emit draft_ready event"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, tier, ts)
+      VALUES ('composer', 'draft_ready', :draft_path, 'low', :tier, :timestamp)
+    bind:
+      tier: "{{ inputs.tier_override }}"
+
+guards:
+  - skip_if: state.daily_llm_cost_usd > env.DAILY_COST_CAP_USD
+  - skip_if: state.emergency_pause == true
+  - skip_if: telegram_ru_drafts_pending_review >= 2
+
+tier: 2   # default: critic-gated (auto-publish after PASS)
