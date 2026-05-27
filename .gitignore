@@ -84,3 +84,5 @@ logs/
 # Local override scripts
 scripts/local-*
 scripts/*.local.*
+node_modules/
+package*.json
