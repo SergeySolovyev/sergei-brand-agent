@@ -188,6 +188,44 @@ SCHEMA = [
       updated_at TEXT
     )
     """,
+    # ── GBrain-inspired pattern memory (cross-session learning) ─────────────
+    """
+    CREATE TABLE IF NOT EXISTS patterns (
+      id INTEGER PRIMARY KEY,
+      pattern_type TEXT CHECK(pattern_type IN ('voice','structure','taboo','timing')),
+      title TEXT,
+      description TEXT,
+      applies_when TEXT,
+      anti_example TEXT,
+      exemplar TEXT,
+      tags_json TEXT,
+      source_draft_path TEXT,
+      outcome TEXT CHECK(outcome IN ('strong_signal','weak_signal','rejected','neutral')),
+      confidence REAL DEFAULT 0.5,
+      created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pattern_usage (
+      pattern_id INTEGER REFERENCES patterns(id) ON DELETE CASCADE,
+      used_by_skill TEXT,
+      used_at TEXT,
+      use_count INTEGER DEFAULT 0,
+      PRIMARY KEY (pattern_id, used_by_skill)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mentions (
+      mention_url TEXT PRIMARY KEY,
+      platform TEXT,
+      author TEXT,
+      text_snippet TEXT,
+      signal_strength TEXT CHECK(signal_strength IN ('low','medium','high')),
+      ts TEXT,
+      first_seen TEXT,
+      replied_at TEXT
+    )
+    """,
 ]
 
 

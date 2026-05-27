@@ -1,0 +1,251 @@
+# Skill: office_hours
+# Adapted from Garry Tan's /office-hours pattern (GStack, YC President).
+# https://github.com/garrytan/gstack/blob/main/docs/skills.md#office-hours
+#
+# IMPORTANT philosophical difference:
+#   GStack /office-hours challenges PRODUCT direction before any coding.
+#   This skill challenges CONTENT direction before any drafting.
+#
+# Used by: Strategist (before queuing any topic for Composer).
+# Compatible with: agentskills.io v0.1 schema (Hermes Agent native).
+
+name: office_hours
+version: 1.0.0
+description: |
+  Pre-content YC-style forcing-questions session. Run BEFORE Composer
+  drafts anything. Reframes the request from "what should I post?" to
+  "what pain am I solving for whom — and is this the narrowest wedge?"
+
+  Output: a strategy doc that becomes the brief for Composer, OR a
+  "this idea is weak, kill it" verdict.
+
+  Two modes:
+    - challenge_mode: Adversarial. Interrogative. Uncomfortable by design.
+                      Used when Sergei adds a new "post idea" via /office_hours.
+    - generative_mode: Collaborative. Used when expanding an already-validated
+                       direction into 3-5 concrete posts.
+
+audience: agent-internal
+category: strategy
+estimated_duration_seconds: 60
+estimated_cost_usd: 0.06-0.12
+
+inputs:
+  - name: raw_request
+    type: string
+    required: true
+    description: |
+      Sergei's or Strategist's initial framing of a content idea.
+      Examples:
+        - "Write a LinkedIn post about my new AI-Yield-Vault preprint"
+        - "I should be more active on X about smart contract auditing"
+        - "Make a thread about the LOB paper"
+  - name: mode
+    type: string
+    default: challenge_mode
+    enum: [challenge_mode, generative_mode]
+  - name: target_audience_hint
+    type: string
+    default: null
+    description: "Optional pre-specified audience (else inferred)"
+
+outputs:
+  - name: strategy_doc_path
+    type: filepath
+  - name: verdict
+    type: string
+    enum: [proceed_strong, proceed_weak, kill, reframe_required]
+  - name: brief_for_composer
+    type: dict
+    description: |
+      If verdict in (proceed_strong, proceed_weak), structured brief:
+      {
+        narrowest_wedge: string,
+        target_audience: string with WHO they are AND what they're feeling,
+        pain_addressed: string (one sentence),
+        falsifiable_premises: [list of 2-4 claims this post is making],
+        recommended_channels: [list],
+        recommended_hook_angles: [list of 2-3],
+        what_NOT_to_do: [list of anti-patterns to avoid],
+        success_signal: how we'd know it landed (1 measurable signal)
+      }
+
+tools_required:
+  - filesystem
+  - sqlite
+  - llm:claude-sonnet-4-5
+
+procedure:
+  - step: "Load context"
+    action: read_files
+    paths:
+      - knowledge_base/identity.json
+      - knowledge_base/preprints.json
+      - knowledge_base/brand_voice_corpus.md
+      - knowledge_base/promotion_playbook.md
+      - personas/strategist.md
+
+  - step: "Pull recent post history (last 30 days)"
+    action: sqlite_query
+    query: |
+      SELECT channel, topic, COUNT(*) as count
+      FROM published
+      WHERE published_at >= date('now', '-30 days')
+      GROUP BY channel, topic
+    capture: recent_history
+
+  - step: "Pull recent grants/CFP queue (deadlines coming up)"
+    action: sqlite_query
+    query: |
+      SELECT title, deadline, match_score FROM grant_candidates
+      WHERE deadline > date('now') AND deadline < date('now', '+45 days')
+      AND match_score >= 0.6
+      ORDER BY deadline ASC LIMIT 10
+    capture: upcoming_opportunities
+
+  - step: "Run the 6 YC forcing questions (challenge mode only)"
+    action: llm_call
+    when: "inputs.mode == 'challenge_mode'"
+    persona: yc_partner
+    model: claude-sonnet-4-5
+    system_prompt: |
+      You are simulating a YC partner doing office hours with Sergei
+      Solovev. Sergei is an HSE FCS researcher building commercial brand
+      around TradFi → AI → DeFi. Goal: technical authority that converts
+      to clients, grants, DeFi investors.
+
+      You are NOT a yes-man. You are NOT a hype machine. You exist to
+      kill weak ideas BEFORE they consume Sergei's attention.
+
+      Apply these 6 forcing questions to the raw request below. Be
+      uncomfortable. Demand specificity. Push back on vagueness.
+
+      1. DEMAND REALITY. Is anyone actually feeling pain that this post
+         addresses? Whose Twitter/LinkedIn/email inbox would react to
+         this with "finally, someone said it"? If you can't name the
+         specific persona, the idea is weak.
+
+      2. STATUS QUO. What does that persona currently DO without this
+         post — what alternative are they relying on? Is your post 10×
+         better than that alternative, or just 1.2×? (1.2× doesn't move
+         anyone.)
+
+      3. DESPERATE SPECIFICITY. Replace every abstract term with a
+         specific concrete. Not "DeFi protocols" — "Aave v3 borrowers
+         on Base who got liquidated last month." Not "AI agents" —
+         "a Python script with Anthropic API and 2 MCP tools." Force
+         this.
+
+      4. NARROWEST WEDGE. If you could only land ONE point with this
+         post, what is it? What's the one sentence the reader carries
+         away? If you can't write that sentence in <20 words, the idea
+         is too broad.
+
+      5. OBSERVATION & SURPRISE. What does Sergei know that the audience
+         doesn't? What's the surprising bit — the thing that makes
+         someone forward it? If there's no surprise, it's a corporate
+         blog post.
+
+      6. FUTURE-FIT. In 3 months, will Sergei look back at this post and
+         think "that landed something" or "that was throwaway"? If
+         throwaway — kill it now.
+
+      Recent posts (last 30 days): {{ recent_history | json }}
+      Upcoming deadlines that could be hooked into: {{ upcoming_opportunities | json }}
+
+      Output JSON:
+      {
+        "demand_reality": { "persona": "...", "would_react_with": "...", "confidence": 0-1 },
+        "status_quo": { "current_alternative": "...", "improvement_multiple": "1.2× | 3× | 10×+" },
+        "desperate_specificity": { "before": "...", "after_concretes": [...] },
+        "narrowest_wedge": "the ONE sentence reader carries away",
+        "observation_surprise": "what Sergei knows that audience doesn't",
+        "future_fit": { "verdict": "landed_something | throwaway | unclear", "reason": "..." },
+        "overall_verdict": "proceed_strong | proceed_weak | kill | reframe_required",
+        "if_reframe_what": "alternate framing of the idea (only if reframe_required)"
+      }
+    user_prompt: "Raw request from Sergei/Strategist: {{ inputs.raw_request }}"
+    capture: yc_review
+
+  - step: "Generate brief for Composer (generative mode OR after passing challenge)"
+    action: llm_call
+    when: "inputs.mode == 'generative_mode' or yc_review.overall_verdict in ('proceed_strong', 'proceed_weak')"
+    model: claude-sonnet-4-5
+    system_prompt: |
+      You build the brief that Composer will use to draft. Be precise,
+      include numbers, include forbidden-anti-patterns.
+    user_prompt: |
+      Raw request: {{ inputs.raw_request }}
+      {{ #yc_review }}YC review: {{ yc_review | json }}{{ /yc_review }}
+      Recent post history: {{ recent_history | json }}
+
+      Produce the brief JSON:
+      {
+        "narrowest_wedge": "...",
+        "target_audience": "WHO they are AND what they're feeling RIGHT NOW",
+        "pain_addressed": "one sentence",
+        "falsifiable_premises": ["...", "..."],
+        "recommended_channels": ["blog" | "linkedin" | "x_thread" | "telegram_ru"],
+        "recommended_hook_angles": ["counterintuitive_finding" | "tactical_takeaway" | "framework" | "before_after" | "case_study"],
+        "what_NOT_to_do": ["e.g. no 'GM frens 🚀'", "no DOI without context", "..."],
+        "success_signal": "single measurable signal (e.g. 'one DM from a CTO asking about audit')"
+      }
+    capture: composer_brief
+
+  - step: "Persist strategy doc"
+    action: write_file
+    path: "data/plans/office_hours/{{ now_unix }}-{{ slugify(inputs.raw_request)[:40] }}.md"
+    content: |
+      # Office Hours: {{ inputs.raw_request }}
+
+      _Date: {{ now_iso }}_
+      _Mode: {{ inputs.mode }}_
+
+      ## Raw request
+      {{ inputs.raw_request }}
+
+      ## YC review
+      ```json
+      {{ yc_review | json | indent(2) }}
+      ```
+
+      ## Verdict: **{{ yc_review.overall_verdict if yc_review else 'generative_mode_no_challenge' }}**
+
+      {% if composer_brief %}
+      ## Brief for Composer
+      ```json
+      {{ composer_brief | json | indent(2) }}
+      ```
+      {% endif %}
+
+      ## Audit pointers
+      - state.sqlite: events table will have `office_hours_complete` event with this path
+      - Next: if proceed → Composer skill with `composer_brief` as input
+
+  - step: "Emit event"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts, raw)
+      VALUES ('office_hours', 'verdict_{{ yc_review.overall_verdict if yc_review else "proceed" }}',
+              :path, :sev, :now, :raw)
+    bind:
+      path: "data/plans/office_hours/..."
+      sev: "{{ 'low' if yc_review.overall_verdict in ('proceed_strong', 'proceed_weak') else 'medium' }}"
+      raw: "{{ {'yc_review': yc_review, 'brief': composer_brief} | json }}"
+
+  - step: "Return"
+    action: return
+    value:
+      strategy_doc_path: "data/plans/office_hours/{{ now_unix }}-{{ slugify(inputs.raw_request)[:40] }}.md"
+      verdict: "{{ yc_review.overall_verdict if yc_review else 'proceed_strong' }}"
+      brief_for_composer: "{{ composer_brief }}"
+
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.daily_llm_cost_usd > env.DAILY_COST_CAP_USD
+
+# NOT cron-driven — invoked on-demand by Strategist or Sergei
+# Strategist calls it before queueing topic to Composer.
+# Sergei can invoke via Telegram bot: /office_hours <idea>
+
+tier: 1   # internal strategy artifact, no public surface

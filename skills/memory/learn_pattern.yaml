@@ -1,0 +1,201 @@
+# Skill: learn_pattern
+# Adapted from GStack's /learn and GBrain's auto-applied learnings pattern.
+# https://github.com/garrytan/gstack — /learn — "high-confidence learnings auto-applied in downstream skills"
+# https://github.com/garrytan/gbrain — hybrid retrieval + entity extraction
+
+name: learn_pattern
+version: 1.0.0
+description: |
+  Persistent pattern memory. When a draft lands well (high signal) or
+  fails badly (rejection/poor engagement), this skill extracts the
+  "lesson" and stores it. Downstream skills (Composer, Critic) read
+  matching patterns when drafting/reviewing similar work.
+
+  3 types of patterns captured:
+    - voice: tone/style cue that matched Sergei's brand
+    - structure: hook shape / flow / closer that worked
+    - taboo: what triggered Critic REJECT or human /reject
+    - timing: what cadence / channel-mix / day-of-week worked
+
+  Search is hybrid: SQL exact match on tags + LLM-judged semantic match
+  on description for fuzzy retrieval.
+
+audience: agent-internal
+category: memory
+estimated_duration_seconds: 12
+estimated_cost_usd: 0.005-0.02
+
+inputs:
+  - name: action
+    type: string
+    required: true
+    enum: [capture, retrieve, prune, list]
+  - name: pattern_type
+    type: string
+    enum: [voice, structure, taboo, timing]
+    description: "Required for capture; optional filter for retrieve"
+  - name: source_draft_path
+    type: filepath
+    description: "Source draft (for capture)"
+  - name: outcome
+    type: string
+    enum: [strong_signal, weak_signal, rejected, neutral]
+    description: "How the post landed (for capture)"
+  - name: query
+    type: string
+    description: "Free-text query (for retrieve)"
+  - name: top_k
+    type: integer
+    default: 5
+
+outputs:
+  - name: patterns
+    type: list
+    description: "List of matching patterns with score (for retrieve)"
+  - name: stored_id
+    type: integer
+    description: "ID of newly stored pattern (for capture)"
+
+tools_required:
+  - filesystem
+  - sqlite
+  - llm:claude-haiku-4-5   # cheap extraction model
+
+procedure:
+  - step: "CAPTURE: Read source draft"
+    action: read_file
+    when: "inputs.action == 'capture'"
+    path: "{{ inputs.source_draft_path }}"
+    capture: draft_text
+
+  - step: "CAPTURE: Extract the lesson"
+    action: llm_call
+    when: "inputs.action == 'capture'"
+    model: claude-haiku-4-5
+    system_prompt: |
+      You extract one durable lesson from a brand post that {{ inputs.outcome }}.
+      Lesson types:
+        - voice: tone/word choice/register decisions
+        - structure: hook angle, paragraph flow, closer pattern
+        - taboo: what caused a REJECT (LLM tell, fake DOI, hype, etc)
+        - timing: time of day, day of week, cadence, channel choice
+
+      Output JSON: {
+        "pattern_type": "{{ inputs.pattern_type }}",
+        "title": "<5-word handle for this pattern>",
+        "description": "<1-2 sentence durable lesson, generalized>",
+        "applies_when": "<predicate: when downstream skills should retrieve this>",
+        "anti_example": "<what NOT to do, from the source>",
+        "exemplar": "<short snippet from the source that exemplifies the lesson>",
+        "tags": ["channel:<ch>", "topic:<...>", "audience:<...>"]
+      }
+    user_prompt: |
+      Source draft ({{ inputs.outcome }}):
+      ---
+      {{ draft_text }}
+      ---
+    capture: lesson
+
+  - step: "CAPTURE: Store in patterns table"
+    action: sqlite_exec
+    when: "inputs.action == 'capture'"
+    query: |
+      INSERT INTO patterns
+      (pattern_type, title, description, applies_when, anti_example,
+       exemplar, tags_json, source_draft_path, outcome, confidence, created_at)
+      VALUES (:pattern_type, :title, :description, :applies_when, :anti_example,
+              :exemplar, :tags_json, :source_path, :outcome, :confidence, :now)
+      RETURNING id
+    bind:
+      pattern_type: "{{ lesson.pattern_type }}"
+      title: "{{ lesson.title }}"
+      description: "{{ lesson.description }}"
+      applies_when: "{{ lesson.applies_when }}"
+      anti_example: "{{ lesson.anti_example }}"
+      exemplar: "{{ lesson.exemplar }}"
+      tags_json: "{{ lesson.tags | json }}"
+      source_path: "{{ inputs.source_draft_path }}"
+      outcome: "{{ inputs.outcome }}"
+      confidence: "{{ 0.9 if inputs.outcome == 'strong_signal' else 0.7 if inputs.outcome == 'rejected' else 0.5 }}"
+    capture: insert_result
+
+  - step: "RETRIEVE: SQL prefilter by tags"
+    action: sqlite_query
+    when: "inputs.action == 'retrieve'"
+    query: |
+      SELECT id, pattern_type, title, description, applies_when,
+             anti_example, exemplar, confidence
+      FROM patterns
+      WHERE confidence >= 0.6
+        {{ "AND pattern_type = :pattern_type" if inputs.pattern_type else "" }}
+      ORDER BY created_at DESC
+      LIMIT 50
+    bind:
+      pattern_type: "{{ inputs.pattern_type }}"
+    capture: candidates
+
+  - step: "RETRIEVE: LLM semantic rank against query"
+    action: llm_call
+    when: "inputs.action == 'retrieve' and len(candidates) > 0 and inputs.query"
+    model: claude-haiku-4-5
+    system_prompt: |
+      Score each pattern 0-1 by relevance to the query.
+      Output JSON map: { pattern_id: score }.
+      Be conservative — patterns with weak relevance score < 0.5.
+    user_prompt: |
+      Query: {{ inputs.query }}
+      Candidates: {{ candidates | json }}
+    capture: scores
+
+  - step: "RETRIEVE: Sort, return top_k"
+    action: python_inline
+    when: "inputs.action == 'retrieve'"
+    code: |
+      if scores:
+          for c in candidates:
+              c["relevance"] = scores.get(c["id"], 0.0)
+          ranked = sorted(candidates, key=lambda c: c["relevance"], reverse=True)
+      else:
+          ranked = candidates
+      patterns = ranked[:inputs.top_k]
+
+  - step: "PRUNE: Soft-delete patterns with low recall"
+    action: sqlite_exec
+    when: "inputs.action == 'prune'"
+    query: |
+      UPDATE patterns
+      SET confidence = confidence * 0.9
+      WHERE id IN (
+        SELECT p.id FROM patterns p
+        LEFT JOIN pattern_usage u ON p.id = u.pattern_id
+        WHERE p.created_at < date('now', '-90 days')
+          AND COALESCE(u.use_count, 0) < 2
+      );
+      DELETE FROM patterns WHERE confidence < 0.2;
+
+  - step: "LIST: Just dump everything"
+    action: sqlite_query
+    when: "inputs.action == 'list'"
+    query: |
+      SELECT pattern_type, COUNT(*) as count, AVG(confidence) as avg_conf
+      FROM patterns GROUP BY pattern_type
+    capture: stats
+
+  - step: "Return"
+    action: return
+    value:
+      action: "{{ inputs.action }}"
+      patterns: "{{ patterns if inputs.action == 'retrieve' else [] }}"
+      stored_id: "{{ insert_result.id if inputs.action == 'capture' else null }}"
+      stats: "{{ stats if inputs.action == 'list' else null }}"
+
+# Auto-invocation hooks (other skills call learn_pattern at these times):
+#   - Composer: BEFORE drafting, call retrieve(query=topic, pattern_type=structure)
+#   - Critic:   BEFORE reviewing, call retrieve(query=draft summary, pattern_type=taboo)
+#   - Publisher AFTER publish + engagement settles (T+24h): call capture with outcome
+#   - human /reject in TG bot: emit capture event with outcome=rejected
+
+guards:
+  - skip_if: state.emergency_pause == true
+
+tier: 1   # internal-only, no public surface
