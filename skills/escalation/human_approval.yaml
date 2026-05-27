@@ -1,0 +1,177 @@
+name: human_approval
+version: 1.0.0
+description: |
+  Tier 3 approval gate via Telegram inline keyboard. Sends draft to Sergei,
+  waits up to N hours for /approve, /reject, or /revise <feedback>. On approve,
+  invokes the channel-specific publish skill. On revise, sends back to Composer
+  with the feedback string.
+
+audience: agent-internal
+category: escalation
+estimated_duration_seconds: variable (depends on Sergei response time)
+estimated_cost_usd: 0.00
+
+inputs:
+  - name: draft_path
+    type: filepath
+    required: true
+  - name: channel
+    type: enum[linkedin, x_twitter, telegram_public, outreach_email]
+    required: true
+  - name: critic_verdict
+    type: object
+    required: true
+  - name: timeout_hours
+    type: integer
+    default: 72
+    description: "If no response in this time, archive draft as 'expired'"
+  - name: reminder_after_hours
+    type: integer
+    default: 6
+
+outputs:
+  - name: decision
+    type: enum[approve, reject, revise, expired]
+  - name: feedback
+    type: string
+    description: "If revise, the feedback string Sergei provided"
+  - name: publish_result
+    type: object
+    description: "If approve, the publish skill's output"
+
+tools_required:
+  - telegram (send + receive)
+  - sqlite (track approval queue state)
+
+guards:
+  - require: inputs.critic_verdict.verdict == "PASS"
+  - require: state.emergency_pause == false
+
+procedure:
+  - step: "Read draft content for preview"
+    action: read_file
+    path: "{{ inputs.draft_path }}"
+    capture: draft_content
+
+  - step: "Format Telegram message with inline keyboard"
+    action: python_inline
+    code: |
+      preview = draft_content[:1000] + "..." if len(draft_content) > 1000 else draft_content
+      msg = f"""📨 *Tier 3 approval needed*
+
+      Channel: *{inputs.channel}*
+      Critic: PASS (round {inputs.critic_verdict['round']})
+
+      *Draft preview*:
+      ```
+      {preview}
+      ```
+
+      Composer concerns:
+      {"\n".join(f"• {c}" for c in draft.composer_concerns)}
+
+      Critic strengths:
+      {"\n".join(f"• {s}" for s in inputs.critic_verdict['strengths'])}
+
+      Reply with:
+      /approve {{queue_id}}
+      /reject {{queue_id}} <reason>
+      /revise {{queue_id}} <feedback>
+      """
+
+  - step: "Insert into approval_queue"
+    action: sqlite_exec
+    query: |
+      INSERT INTO approval_queue (
+        queue_id, draft_path, channel, critic_verdict_json, created_at, status
+      ) VALUES (:queue_id, :draft_path, :channel, :critic_json, :now, 'pending')
+      RETURNING queue_id
+    capture: queue_id
+
+  - step: "Send to Telegram with inline buttons"
+    action: telegram_send
+    chat_id: "{{ env.TELEGRAM_HOME_CHANNEL }}"
+    text: "{{ msg }}"
+    parse_mode: Markdown
+    reply_markup:
+      inline_keyboard:
+        - - text: "✅ Approve"
+            callback_data: "approve:{{ queue_id }}"
+          - text: "❌ Reject"
+            callback_data: "reject:{{ queue_id }}"
+        - - text: "✏️ Revise"
+            callback_data: "revise:{{ queue_id }}"
+          - text: "👁 Full draft"
+            callback_data: "show:{{ queue_id }}"
+
+  - step: "Wait for response or timeout (polling state.sqlite)"
+    action: wait_for_state_change
+    table: approval_queue
+    where: "queue_id = :queue_id AND status != 'pending'"
+    timeout_seconds: "{{ inputs.timeout_hours * 3600 }}"
+    reminder_interval_seconds: "{{ inputs.reminder_after_hours * 3600 }}"
+    on_reminder:
+      action: telegram_send
+      text: |
+        ⏰ Reminder: Tier 3 draft awaiting your decision ({{ inputs.channel }}).
+        Queue ID: {{ queue_id }}.
+        /approve {{ queue_id }}, /reject {{ queue_id }} <reason>, or /revise {{ queue_id }} <feedback>
+
+  - step: "Read decision from queue state"
+    action: sqlite_query
+    query: |
+      SELECT status, feedback, decided_at FROM approval_queue WHERE queue_id = :queue_id
+    capture: queue_state
+
+  - step: "Branch on decision"
+    action: switch
+    case:
+      - when: "queue_state.status == 'approved'"
+        action: invoke_publish_skill
+        skill: "action/publish_{{ inputs.channel }}"
+        inputs:
+          draft_path: "{{ inputs.draft_path }}"
+        capture: publish_result
+
+      - when: "queue_state.status == 'rejected'"
+        action: bash
+        command: |
+          mv {{ inputs.draft_path }} {{ inputs.draft_path }}.rejected
+          echo "Rejected: {{ queue_state.feedback }}" >> {{ inputs.draft_path }}.rejected
+
+      - when: "queue_state.status == 'revise'"
+        action: invoke_skill
+        skill: "composition/compose_{{ inputs.channel }}"
+        inputs:
+          topic: "(revise: {{ queue_state.feedback }})"
+          previous_draft: "{{ inputs.draft_path }}"
+          human_feedback: "{{ queue_state.feedback }}"
+
+      - when: "queue_state.status == 'expired'"
+        action: bash
+        command: |
+          mv {{ inputs.draft_path }} {{ inputs.draft_path }}.expired
+
+  - step: "Log decision"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts, raw)
+      VALUES ('approval', :status, :draft_path, 'medium', :timestamp, :feedback)
+
+  - step: "Return"
+    action: return
+    value:
+      decision: "{{ queue_state.status }}"
+      feedback: "{{ queue_state.feedback }}"
+      publish_result: "{{ publish_result }}"
+
+error_handling:
+  - on: telegram_send_failed
+    action: retry_with_backoff
+    max_retries: 3
+  - on: timeout
+    action: mark_expired
+  - on: invalid_callback_data
+    action: log_warn_ignore
+
+tier: 3   # this IS the tier-3 gate

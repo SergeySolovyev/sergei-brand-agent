@@ -1,0 +1,87 @@
+name: compose_linkedin
+version: 1.0.0
+description: |
+  Draft a LinkedIn post (200-400 words) in Sergei's professional voice.
+  Output goes to data/drafts/, queued for Critic review, then Tier 3 human
+  approval in Telegram before browser-driven publication.
+
+audience: agent-internal
+category: composition
+estimated_duration_seconds: 30
+estimated_cost_usd: 0.02-0.05
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+  - name: hook
+    type: string
+    description: "Optional first-two-lines hook from Strategist"
+  - name: target_audience
+    type: string
+    default: "DeFi VCs, CTOs, smart contract auditors"
+  - name: sources
+    type: list[url]
+    required: false
+  - name: hashtags_seed
+    type: list[string]
+    default: [DeFi, SmartContractSecurity, MachineLearning]
+
+outputs:
+  - name: draft_path
+    type: filepath
+
+tools_required:
+  - filesystem
+  - sqlite
+  - llm:claude-sonnet-4-5
+
+procedure:
+  - step: "Load context"
+    action: read_files
+    paths:
+      - knowledge_base/identity.json
+      - knowledge_base/preprints.json
+      - knowledge_base/brand_voice_corpus.md
+      - knowledge_base/glossary.md
+      - personas/composer.md
+
+  - step: "Read recent LinkedIn corpus samples for tone calibration"
+    action: read_section
+    file: knowledge_base/brand_voice_corpus.md
+    section: "LinkedIn samples"
+    max_samples: 10
+
+  - step: "Invoke Composer with linkedin sub-persona"
+    action: llm_call
+    persona: composer
+    sub_persona: linkedin
+    system_prompt_file: personas/composer.md
+    user_prompt: |
+      Channel: linkedin
+      Topic: {{ inputs.topic }}
+      Target audience: {{ inputs.target_audience }}
+      {{ #inputs.hook }}Suggested hook: {{ inputs.hook }}{{ /inputs.hook }}
+      Length: 200-400 words.
+      Hashtags seed (use 5-7 mixing broad + niche): {{ inputs.hashtags_seed }}
+      Must include 1 specific number/metric/outcome.
+      No emoji at start of post.
+      Output the draft as Markdown with frontmatter (channel, target, sources,
+      composer_concerns). One big idea.
+
+  - step: "Save draft + emit event"
+    action: write_file
+    path: "data/drafts/{{ now_date }}-linkedin-{{ slugify(inputs.topic) }}.md"
+
+  - step: "Emit draft_ready event"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts)
+      VALUES ('composer', 'draft_ready', :draft_path, 'medium', :timestamp)
+
+guards:
+  - skip_if: state.daily_llm_cost_usd > env.DAILY_COST_CAP_USD
+  - skip_if: state.emergency_pause == true
+  - skip_if: linkedin_drafts_pending_approval >= 3   # don't backlog beyond 3
+
+tier: 3   # human approval required (career impact)

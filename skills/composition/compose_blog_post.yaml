@@ -1,0 +1,136 @@
+name: compose_blog_post
+version: 1.0.0
+description: |
+  Draft a long-form technical blog post for sergeisolovev.com/blog/.
+  Output is a Markdown file with frontmatter, ready for Critic review.
+  Composer persona handles the actual drafting per personas/composer.md.
+
+audience: agent-internal (called by Strategist after queueing a topic)
+category: composition
+estimated_duration_seconds: 90
+estimated_cost_usd: 0.05-0.12   # Claude Sonnet, ~3-6k output tokens
+
+inputs:
+  - name: topic
+    type: string
+    required: true
+    description: "What the post is about, in 1-2 sentences"
+  - name: target_audience
+    type: string
+    default: "DeFi researchers and smart contract auditors"
+  - name: sources
+    type: list[url]
+    required: true
+    description: "URLs Composer must cite (DOIs, GitHub repos, papers)"
+  - name: hook_angle
+    type: string
+    description: "Optional Strategist-suggested hook"
+  - name: length_words
+    type: integer
+    default: 1200
+    minimum: 800
+    maximum: 1500
+
+outputs:
+  - name: draft_path
+    type: filepath
+    description: "data/drafts/YYYY-MM-DD-blog-<slug>.md"
+  - name: composer_concerns
+    type: list[string]
+    description: "Self-flagged issues for Critic to look at"
+
+tools_required:
+  - browser_use (verify source URLs)
+  - filesystem (write draft)
+  - sqlite (read knowledge_base)
+  - llm:claude-sonnet-4-5
+
+procedure:
+  - step: "Load knowledge base (identity, preprints, brand voice, glossary)"
+    action: read_files
+    paths:
+      - knowledge_base/identity.json
+      - knowledge_base/preprints.json
+      - knowledge_base/brand_voice_corpus.md
+      - knowledge_base/glossary.md
+      - personas/composer.md
+
+  - step: "Verify every source URL is reachable"
+    action: browser_verify
+    urls: "{{ inputs.sources }}"
+    on_failure: abort_with_error
+
+  - step: "If topic relates to existing preprint, attach abstract for context"
+    action: python_inline
+    code: |
+      relevant = [p for p in preprints if any(s in p['doi_url'] for s in inputs.sources)]
+      context_block = "\n".join([f"- {p['title']}: {p['abstract']}" for p in relevant])
+
+  - step: "Generate slug from topic"
+    action: python_inline
+    code: |
+      slug = slugify(inputs.topic)[:50]
+
+  - step: "Invoke Composer LLM with blog sub-persona"
+    action: llm_call
+    persona: composer
+    sub_persona: blog
+    system_prompt_file: personas/composer.md
+    user_prompt: |
+      Channel: blog
+      Topic: {{ inputs.topic }}
+      Target audience: {{ inputs.target_audience }}
+      Sources to cite (verified reachable):
+      {{ #inputs.sources }}
+        - {{ . }}
+      {{ /inputs.sources }}
+
+      {{ #context_block }}
+      Existing preprint context:
+      {{ context_block }}
+      {{ /context_block }}
+
+      {{ #inputs.hook_angle }}
+      Strategist's suggested hook: {{ inputs.hook_angle }}
+      {{ /inputs.hook_angle }}
+
+      Length target: {{ inputs.length_words }} words.
+
+      Write the draft NOW. Output ONLY the markdown file content (frontmatter + body),
+      no commentary. Frontmatter MUST include:
+        title, date, slug, description (max 155 chars), tags, canonical_doi (if applicable),
+        composer_concerns (list of things you're not sure about for Critic to look at).
+
+  - step: "Save draft"
+    action: write_file
+    path: "data/drafts/{{ now_date }}-blog-{{ slug }}.md"
+    content: "{{ llm_output }}"
+
+  - step: "Emit draft_ready event for Critic"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts)
+      VALUES ('composer', 'draft_ready', :draft_path, 'medium', :timestamp)
+
+  - step: "Return"
+    action: return
+    value:
+      draft_path: "data/drafts/{{ now_date }}-blog-{{ slug }}.md"
+      composer_concerns: "{{ parsed_frontmatter.composer_concerns }}"
+
+error_handling:
+  - on: source_url_unreachable
+    action: abort_with_error
+    message: "Source {{ url }} returned {{ status }}. Cannot proceed."
+  - on: llm_rate_limit
+    action: retry_with_backoff
+    max_retries: 2
+  - on: filesystem_error
+    action: log_error_escalate
+
+guards:
+  - skip_if: state.daily_llm_cost_usd > env.DAILY_COST_CAP_USD
+  - skip_if: state.emergency_pause == true
+  - skip_if: drafts_already_today >= 2   # 1-2 blog posts/week max
+
+tier: 2   # auto with Critic gate; commits go via git PR (revertable)

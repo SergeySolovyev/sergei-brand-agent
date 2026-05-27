@@ -1,0 +1,188 @@
+name: publish_blog_post
+version: 1.0.0
+description: |
+  Publish an approved blog post draft to sergeisolovev.com via GitHub PR.
+  Creates a new branch, commits the draft to /blog/, opens a PR.
+  Tier 2: requires Critic PASS verdict on the draft; Sergei sees PR
+  notification and can review/merge or revert.
+
+audience: agent-internal
+category: action
+estimated_duration_seconds: 30
+estimated_cost_usd: 0.00   # no LLM, pure git ops
+
+inputs:
+  - name: draft_path
+    type: filepath
+    required: true
+    description: "Path to draft in data/drafts/ (must have PASS verdict)"
+  - name: critic_verdict
+    type: object
+    required: true
+    description: "Critic's verdict object; must have verdict='PASS'"
+
+outputs:
+  - name: pr_url
+    type: url
+    description: "URL of the created PR"
+  - name: branch_name
+    type: string
+  - name: commit_sha
+    type: string
+
+tools_required:
+  - filesystem (read draft)
+  - github_mcp (create PR)
+  - git (local clone of blog repo)
+
+guards:
+  - require: inputs.critic_verdict.verdict == "PASS"
+  - skip_if: state.emergency_pause == true
+  - skip_if: published_blog_today >= 1   # max 1 blog/day
+  - require: state.tier_2_enabled == true
+
+procedure:
+  - step: "Verify Critic PASS"
+    action: python_inline
+    code: |
+      assert inputs.critic_verdict["verdict"] == "PASS", \
+          f"Cannot publish: Critic verdict is {inputs.critic_verdict['verdict']}"
+
+  - step: "Parse draft frontmatter"
+    action: parse_yaml_frontmatter
+    file: "{{ inputs.draft_path }}"
+    capture: meta
+
+  - step: "Validate frontmatter has required fields"
+    action: python_inline
+    code: |
+      required = ["title", "date", "slug", "description", "tags"]
+      missing = [k for k in required if k not in meta]
+      assert not missing, f"Draft missing required frontmatter: {missing}"
+
+  - step: "Clone or fetch blog repo to working directory"
+    action: bash
+    command: |
+      cd /workspace/data/repos
+      if [ -d sergeisolovev.com ]; then
+        cd sergeisolovev.com
+        git fetch origin
+        git checkout main
+        git pull origin main
+      else
+        git clone https://x-access-token:{{ env.GITHUB_TOKEN }}@github.com/{{ env.GITHUB_BLOG_REPO }}.git
+        cd sergeisolovev.com
+      fi
+
+  - step: "Create new branch"
+    action: bash
+    command: |
+      cd /workspace/data/repos/sergeisolovev.com
+      BRANCH="agent/blog-{{ meta.date }}-{{ meta.slug }}"
+      git checkout -b "$BRANCH"
+      echo "BRANCH=$BRANCH" >> /tmp/pub-state
+
+  - step: "Copy draft into repo /blog/ directory"
+    action: bash
+    command: |
+      mkdir -p /workspace/data/repos/sergeisolovev.com/blog
+      cp {{ inputs.draft_path }} /workspace/data/repos/sergeisolovev.com/blog/{{ meta.date }}-{{ meta.slug }}.md
+
+  - step: "Update sitemap.xml with new entry"
+    action: python_inline
+    code: |
+      sitemap_path = "/workspace/data/repos/sergeisolovev.com/sitemap.xml"
+      new_url = f"https://sergeisolovev.com/blog/{meta['date']}-{meta['slug']}.html"
+      append_to_sitemap(sitemap_path, new_url, lastmod=meta['date'], priority=0.85)
+
+  - step: "Commit"
+    action: bash
+    command: |
+      cd /workspace/data/repos/sergeisolovev.com
+      git config user.email "{{ env.GITHUB_EMAIL }}"
+      git config user.name "sergei-brand-agent"
+      git add blog/ sitemap.xml
+      git commit -m "blog: {{ meta.title }}
+
+      Drafted: {{ meta.date }}
+      Slug: {{ meta.slug }}
+      Critic verdict: PASS
+      Co-Authored-By: sergei-brand-agent <{{ env.GITHUB_EMAIL }}>"
+      git push origin "$(cat /tmp/pub-state | grep BRANCH | cut -d= -f2)"
+
+  - step: "Open PR via GitHub MCP"
+    action: github_mcp_call
+    operation: create_pull_request
+    owner: "{{ env.GITHUB_BLOG_REPO.split('/')[0] }}"
+    repo: "{{ env.GITHUB_BLOG_REPO.split('/')[1] }}"
+    title: "blog: {{ meta.title }}"
+    body: |
+      🤖 Drafted by sergei-brand-agent.
+
+      **Title**: {{ meta.title }}
+      **Slug**: `{{ meta.slug }}`
+      **Date**: {{ meta.date }}
+      **Word count**: {{ meta.word_count }}
+      **Critic verdict**: PASS (round {{ inputs.critic_verdict.round }})
+
+      **Composer concerns flagged**:
+      {{ #meta.composer_concerns }}
+      - {{ . }}
+      {{ /meta.composer_concerns }}
+
+      **Critic strengths noted**:
+      {{ #inputs.critic_verdict.strengths }}
+      - {{ . }}
+      {{ /inputs.critic_verdict.strengths }}
+
+      ---
+      Review and merge if satisfactory. If issues found, close PR and
+      reply `/revise <reason>` in Telegram bot.
+    head: "agent/blog-{{ meta.date }}-{{ meta.slug }}"
+    base: main
+    capture: pr_result
+
+  - step: "Notify Sergei via Telegram"
+    action: telegram_send
+    chat_id: "{{ env.TELEGRAM_HOME_CHANNEL }}"
+    text: |
+      📝 New blog draft PR opened:
+      {{ pr_result.html_url }}
+
+      Title: {{ meta.title }}
+      Words: {{ meta.word_count }}
+      Critic: PASS (round {{ inputs.critic_verdict.round }})
+
+      Review and merge if OK.
+
+  - step: "Log publication event"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, severity, ts, raw)
+      VALUES ('publisher', 'blog_pr_opened', :pr_url, 'medium', :timestamp, :meta)
+
+  - step: "Mark draft as published"
+    action: bash
+    command: |
+      mv {{ inputs.draft_path }} {{ inputs.draft_path }}.published
+
+  - step: "Return"
+    action: return
+    value:
+      pr_url: "{{ pr_result.html_url }}"
+      branch_name: "agent/blog-{{ meta.date }}-{{ meta.slug }}"
+      commit_sha: "{{ pr_result.head.sha }}"
+
+error_handling:
+  - on: git_push_failed
+    action: log_error_escalate
+    notify: telegram
+    message: "git push failed for blog publication — check credentials"
+  - on: pr_create_failed
+    action: rollback_branch
+    notify: telegram
+  - on: critic_not_pass
+    action: abort_with_error
+    message: "Cannot publish — Critic verdict is not PASS"
+
+tier: 2   # auto with Critic gate; reverible via git

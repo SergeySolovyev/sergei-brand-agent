@@ -1,0 +1,242 @@
+# =============================================================================
+# sergei-brand-agent — Hermes Agent configuration
+#
+# Loaded by Hermes on boot. Secrets come from .env (interpolated as ${VAR}).
+# =============================================================================
+
+agent:
+  name: sergei-brand-agent
+  version: 0.1.0
+  soul_file: SOUL.md
+  timezone: ${TZ:-Europe/Moscow}
+  log_level: ${LOG_LEVEL:-INFO}
+
+# -----------------------------------------------------------------------------
+# Cognitive agents — Triad
+# -----------------------------------------------------------------------------
+personas:
+  strategist:
+    prompt_file: personas/strategist.md
+    llm:
+      provider: anthropic
+      model: claude-sonnet-4-5
+      max_tokens: 8192
+      temperature: 0.5
+    triggers:
+      - cron: "0 9 * * 1"      # Mon 09:00 MSK — weekly plan
+      - event: "major_citation" # OpenAlex new citation detected
+      - event: "manual_invocation"
+    permissions:
+      read: [knowledge_base/, data/state.sqlite, data/pulse/, data/plans/]
+      write: [data/plans/, data/state.sqlite]
+      tools: [filesystem, sqlite, telegram_send]
+
+  composer:
+    prompt_file: personas/composer.md
+    llm:
+      provider: anthropic
+      model: claude-sonnet-4-5
+      max_tokens: 8192
+      temperature: 0.7
+    triggers:
+      - event: "topic_queued"
+      - event: "auto_react"
+    permissions:
+      read: [knowledge_base/, data/state.sqlite, data/drafts/]
+      write: [data/drafts/]
+      tools: [browser_use, filesystem, sqlite, github_mcp]
+
+  critic:
+    prompt_file: personas/critic.md
+    llm:
+      provider: anthropic
+      model: claude-sonnet-4-5
+      max_tokens: 4096
+      temperature: 0.3   # lower temperature — more deterministic adversarial review
+    triggers:
+      - event: "draft_ready"
+    permissions:
+      read: [knowledge_base/, data/drafts/, data/state.sqlite]
+      write: [data/drafts/]   # only writes verdict alongside draft
+      tools: [browser_use, filesystem]   # NO publish tools — Critic cannot publish
+
+# -----------------------------------------------------------------------------
+# Tool capabilities
+# -----------------------------------------------------------------------------
+tools:
+  browser_use:
+    enabled: true
+    headless: true
+    profile_dir: /home/agent/.config/chromium-profile
+    user_agent: ${BROWSER_USE_USER_AGENT}
+    timeout_seconds: 60
+    screenshot_on_error: true
+
+  computer_use:
+    enabled: ${COMPUTER_USE_ENABLED:-false}
+    display:
+      width: ${COMPUTER_USE_DISPLAY_WIDTH:-1280}
+      height: ${COMPUTER_USE_DISPLAY_HEIGHT:-800}
+
+  rentahuman:
+    enabled: ${RAH_ENABLED:-false}
+    mcp_url: ${RAH_MCP_URL}
+    default_budget_usd: ${RAH_DEFAULT_BUDGET_USD:-15}
+    timeout_minutes: ${RAH_TIMEOUT_MINUTES:-20}
+
+# -----------------------------------------------------------------------------
+# MCP servers
+# -----------------------------------------------------------------------------
+mcp:
+  servers:
+    - name: github
+      type: github
+      token: ${GITHUB_TOKEN}
+      allowed_repos:
+        - SergeySolovyev/sergeisolovev.com
+        - SergeySolovyev/SergeySolovyev
+      operations: [read, write_pr]   # only PRs, no direct main push
+
+    - name: telegram
+      type: telegram
+      bot_token: ${TELEGRAM_BOT_TOKEN}
+      allowed_users: ${TELEGRAM_ALLOWED_USERS}
+      home_channel: ${TELEGRAM_HOME_CHANNEL}
+      mode: ${TELEGRAM_USE_WEBHOOK:-polling}   # webhook or polling
+
+    - name: filesystem
+      type: filesystem
+      root: /workspace
+      readonly_paths: [/workspace/knowledge_base, /workspace/personas, /workspace/SOUL.md]
+
+    - name: sqlite
+      type: sqlite
+      db_path: /workspace/data/state.sqlite
+
+    - name: rentahuman
+      type: rah
+      enabled: ${RAH_ENABLED:-false}
+      url: ${RAH_MCP_URL}
+
+# -----------------------------------------------------------------------------
+# Channels (where the agent publishes)
+# -----------------------------------------------------------------------------
+channels:
+  blog:
+    type: github_pr
+    repo: SergeySolovyev/sergeisolovev.com
+    path_template: "blog/{date}-{slug}.md"
+    branch_template: "agent/blog-{date}-{slug}"
+    auto_merge: false   # Sergei reviews PR before merge
+    tier: 2   # auto with Critic gate; Sergei can revert via git
+    frequency_cap: "2/week"
+
+  linkedin:
+    type: browser_use
+    url: https://www.linkedin.com/
+    selector_profile: SergeySolovyev
+    tier: 3   # human approval required
+    frequency_cap: "4/week"
+
+  x_twitter:
+    type: browser_use
+    url: https://twitter.com/
+    selector_profile: SergeySolovyev
+    tier: 3
+    frequency_cap: "6/week"
+
+  telegram_personal:
+    type: telegram
+    chat_id: ${TELEGRAM_HOME_CHANNEL}
+    tier: 1   # full auto
+    frequency_cap: "5/week"
+
+  telegram_public:   # public channel @sergei_solovev (when created)
+    type: telegram
+    chat_id: ""   # to be filled
+    tier: 3
+    frequency_cap: "5/week"
+
+  mastodon:
+    type: rss_broadcast
+    instance: infosec.exchange
+    tier: 1
+    frequency_cap: "auto"   # broadcasts on every blog publish
+
+# -----------------------------------------------------------------------------
+# Approval queue (Tier 3)
+# -----------------------------------------------------------------------------
+approval:
+  queue_path: data/state.sqlite
+  notification_channel: telegram_personal
+  reminder_after_hours: 6
+  auto_expire_after_hours: 72
+  approval_command: /approve
+  reject_command: /reject
+  revise_command: /revise
+
+# -----------------------------------------------------------------------------
+# Safety
+# -----------------------------------------------------------------------------
+safety:
+  drafts_only_mode: ${DRAFTS_ONLY_MODE:-false}
+  telegram_only_mode: ${TELEGRAM_ONLY_MODE:-false}
+  emergency_pause: ${EMERGENCY_PAUSE:-false}
+  critic_required: true   # Tier 2+ always passes through Critic
+  max_critic_rounds: 2   # then escalate to human
+
+  cost_caps:
+    daily_usd: ${DAILY_COST_CAP_USD:-5}
+    weekly_usd: ${WEEKLY_COST_CAP_USD:-25}
+    monthly_usd: ${MONTHLY_COST_CAP_USD:-80}
+    on_cap_breach: drafts_only_mode
+
+  network_whitelist: ${SANDBOX_NETWORK_WHITELIST}
+
+# -----------------------------------------------------------------------------
+# Scheduling
+# -----------------------------------------------------------------------------
+schedules:
+  - name: weekly_strategist
+    cron: "0 9 * * 1"   # Mon 09:00 MSK
+    invoke: persona:strategist
+    action: weekly_plan
+
+  - name: discovery_sunday
+    cron: "0 9 * * 0"   # Sun 09:00 MSK
+    invoke: skill:discovery/scan_all_sources
+
+  - name: daily_pulse
+    cron: "0 21 * * *"  # daily 21:00 MSK
+    invoke: skill:reporting/daily_pulse
+
+  - name: monitor_research_visibility
+    cron: "*/30 * * * *"  # every 30 min
+    invoke: skill:monitoring/check_research_visibility
+
+  - name: monitor_inbound
+    cron: "*/15 * * * *"  # every 15 min
+    invoke: skill:monitoring/check_inbound_mentions
+
+# -----------------------------------------------------------------------------
+# Tracing & evaluation
+# -----------------------------------------------------------------------------
+traces:
+  enabled: true
+  path: data/traces/{date}/{session_id}.jsonl
+  capture:
+    - llm_calls
+    - tool_calls
+    - critic_verdicts
+    - approval_decisions
+    - cost_per_call
+
+evaluation:
+  weekly_report_cron: "0 10 * * 1"
+  metrics:
+    - critic_reject_rate    # target: 15-30%
+    - critic_revision_rounds_avg   # target: 1.3-1.6
+    - approval_queue_dwell_hours
+    - publications_per_channel
+    - cost_per_publication
+    - rah_escalations

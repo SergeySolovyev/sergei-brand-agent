@@ -1,0 +1,175 @@
+# =============================================================================
+# docker-compose.yml — sergei-brand-agent runtime stack
+#
+# Services:
+#   agent           — Hermes Agent + Browser-Use + Chromium (sandboxed)
+#   egress-proxy    — outbound HTTPS proxy with domain whitelist
+#   vault (opt)     — HashiCorp Vault dev mode for secrets (replace with
+#                     1Password Connect or external Vault in production)
+#
+# Sandbox model:
+#   - agent service has NO direct internet — only through egress-proxy
+#   - egress-proxy enforces SANDBOX_NETWORK_WHITELIST
+#   - filesystem isolated to named volumes; host-mounted only for ./data
+#   - credentials mounted on-demand from vault via env (never logged)
+# =============================================================================
+
+version: "3.9"
+
+networks:
+  agent-internal:
+    driver: bridge
+    internal: false   # set to true once egress-proxy is configured
+
+volumes:
+  agent-data:
+    driver: local
+  browser-profile:
+    driver: local
+  hermes-state:
+    driver: local
+
+services:
+  # ---------------------------------------------------------------------------
+  # Egress proxy — whitelists outbound destinations
+  # ---------------------------------------------------------------------------
+  egress-proxy:
+    image: tinyproxy/tinyproxy:latest
+    container_name: sergei-brand-agent-egress
+    restart: unless-stopped
+    networks: [agent-internal]
+    volumes:
+      - ./scripts/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+    ports: []   # no external ports — internal only
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8888"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Main agent
+  # ---------------------------------------------------------------------------
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: sergei-brand-agent:latest
+    container_name: sergei-brand-agent
+    restart: unless-stopped
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+    networks: [agent-internal]
+    # NO direct port mapping — agent talks outbound through egress-proxy only
+    ports: []
+    volumes:
+      # Mount data dir (writable, persistent)
+      - ./data:/workspace/data
+      # Browser profile (persistent across restarts — Sergei logs in once)
+      - browser-profile:/home/agent/.config/chromium-profile
+      # Hermes state (memories, skills, sessions)
+      - hermes-state:/home/agent/.hermes
+    environment:
+      # All HTTP traffic routed through egress-proxy
+      HTTP_PROXY: http://egress-proxy:8888
+      HTTPS_PROXY: http://egress-proxy:8888
+      NO_PROXY: localhost,127.0.0.1,egress-proxy
+
+      # Configuration
+      TZ: ${TZ:-Europe/Moscow}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PYTHONUNBUFFERED: "1"
+
+      # LLM providers (read from .env)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_DEFAULT_MODEL: ${ANTHROPIC_DEFAULT_MODEL:-claude-sonnet-4-5}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+
+      # Telegram
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS}
+      TELEGRAM_HOME_CHANNEL: ${TELEGRAM_HOME_CHANNEL}
+      TELEGRAM_USE_WEBHOOK: ${TELEGRAM_USE_WEBHOOK:-false}
+
+      # GitHub
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_USERNAME: ${GITHUB_USERNAME}
+      GITHUB_EMAIL: ${GITHUB_EMAIL}
+      GITHUB_BLOG_REPO: ${GITHUB_BLOG_REPO:-SergeySolovyev/sergeisolovev.com}
+
+      # OpenAlex
+      OPENALEX_AUTHOR_ID: ${OPENALEX_AUTHOR_ID:-A5127404993}
+      OPENALEX_POLITE_EMAIL: ${OPENALEX_POLITE_EMAIL}
+
+      # figshare
+      FIGSHARE_AUTHOR_ID: ${FIGSHARE_AUTHOR_ID:-23264342}
+
+      # Browser
+      BROWSER_USE_HEADLESS: ${BROWSER_USE_HEADLESS:-true}
+      BROWSER_USE_PROFILE_DIR: /home/agent/.config/chromium-profile
+
+      # Cost controls
+      DAILY_COST_CAP_USD: ${DAILY_COST_CAP_USD:-5}
+      WEEKLY_COST_CAP_USD: ${WEEKLY_COST_CAP_USD:-25}
+      MONTHLY_COST_CAP_USD: ${MONTHLY_COST_CAP_USD:-80}
+
+      # Safety modes
+      DRAFTS_ONLY_MODE: ${DRAFTS_ONLY_MODE:-false}
+      TELEGRAM_ONLY_MODE: ${TELEGRAM_ONLY_MODE:-false}
+      EMERGENCY_PAUSE: ${EMERGENCY_PAUSE:-false}
+
+      # Phase 2
+      RAH_ENABLED: ${RAH_ENABLED:-false}
+      RAH_MCP_URL: ${RAH_MCP_URL}
+      RAH_API_KEY: ${RAH_API_KEY}
+      COMPUTER_USE_ENABLED: ${COMPUTER_USE_ENABLED:-false}
+
+    # Resource limits (Hetzner CX21: 2 vCPU, 4 GB RAM)
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "1.5"
+        reservations:
+          memory: 1G
+
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE   # browser needs to write to profile dir
+    read_only: false   # browser caches need write; data dir is also writable
+    tmpfs:
+      - /tmp:size=512M,mode=1777
+
+    # Healthcheck inherited from Dockerfile
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Vault (DEV MODE — replace with real Vault or 1Password Connect in production)
+  # ---------------------------------------------------------------------------
+  vault:
+    image: hashicorp/vault:latest
+    container_name: sergei-brand-agent-vault
+    restart: unless-stopped
+    networks: [agent-internal]
+    ports: []
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-dev-root-token}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    profiles:
+      - vault-dev   # only start if explicitly enabled via --profile vault-dev

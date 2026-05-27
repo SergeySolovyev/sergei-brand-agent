@@ -1,0 +1,102 @@
+# =============================================================================
+# Dockerfile.agent — Hermes Agent + Browser-Use + Playwright + Chromium
+#
+# Build:  docker build -f Dockerfile.agent -t sergei-brand-agent:latest .
+# =============================================================================
+
+FROM python:3.11-slim-bookworm AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# -----------------------------------------------------------------------------
+# OS-level dependencies for Chromium + Playwright
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Hermes Agent recommends:
+    ripgrep ffmpeg curl ca-certificates git tini \
+    # Playwright Chromium deps:
+    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+    libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+    libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
+    libatspi2.0-0 libxshmfence1 \
+    # Useful tooling:
+    jq sqlite3 \
+    # Cleanup:
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Install uv (fast Python package manager — Hermes installer uses this)
+# -----------------------------------------------------------------------------
+RUN curl -fsSL https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:/root/.cargo/bin:$PATH"
+
+# -----------------------------------------------------------------------------
+# Create non-root agent user
+# -----------------------------------------------------------------------------
+RUN useradd -m -u 1000 -s /bin/bash agent
+USER agent
+WORKDIR /workspace
+
+# -----------------------------------------------------------------------------
+# Install Hermes Agent (from NousResearch)
+# -----------------------------------------------------------------------------
+# Pin to a tested commit to avoid upstream surprises; bump deliberately.
+ENV HERMES_AGENT_VERSION=main
+RUN curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_AGENT_VERSION}/scripts/install.sh \
+    | bash -s -- --non-interactive --install-dir=/home/agent/.hermes
+
+ENV PATH="/home/agent/.local/bin:$PATH"
+
+# -----------------------------------------------------------------------------
+# Install Browser-Use + Playwright + Chromium
+# -----------------------------------------------------------------------------
+RUN python -m pip install --user --no-cache-dir \
+    "browser-use>=0.1.40" \
+    "playwright>=1.49.0" \
+    "anthropic>=0.40.0" \
+    "openai>=1.50.0" \
+    "python-telegram-bot>=21.0" \
+    "PyYAML>=6.0" \
+    "httpx>=0.27.0" \
+    "rich>=13.0.0" \
+    "pydantic>=2.0.0" \
+    "GitPython>=3.1.0" \
+    "PyGithub>=2.0.0" \
+    "feedgen>=1.0.0"
+
+RUN python -m playwright install chromium
+# Note: Playwright will install Chromium under /home/agent/.cache/ms-playwright/
+
+# -----------------------------------------------------------------------------
+# Copy agent code (this directory) into the image
+# -----------------------------------------------------------------------------
+COPY --chown=agent:agent SOUL.md config.yaml /workspace/
+COPY --chown=agent:agent personas/ /workspace/personas/
+COPY --chown=agent:agent skills/ /workspace/skills/
+COPY --chown=agent:agent knowledge_base/ /workspace/knowledge_base/
+COPY --chown=agent:agent scripts/ /workspace/scripts/
+
+# Pre-create data directories with right perms
+RUN mkdir -p /workspace/data/traces /workspace/data/drafts \
+             /workspace/data/pulse /workspace/data/plans \
+             /workspace/data/repos
+
+# Healthcheck endpoint script
+COPY --chown=agent:agent scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
+
+# -----------------------------------------------------------------------------
+# Runtime configuration
+# -----------------------------------------------------------------------------
+ENV PYTHONUNBUFFERED=1
+ENV HERMES_HOME=/home/agent/.hermes
+ENV HERMES_CONFIG=/workspace/config.yaml
+
+# Don't expose any ports by default — agent talks outbound only.
+# If Telegram webhook mode is used, expose 8080.
+EXPOSE 8080
+
+HEALTHCHECK --interval=60s --timeout=10s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh || exit 1
+
+ENTRYPOINT ["tini", "--"]
+CMD ["hermes", "agent", "run", "--config", "/workspace/config.yaml"]

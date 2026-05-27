@@ -1,0 +1,183 @@
+# Skill: check_research_visibility
+# Used by: Strategist (invoked via cron every 30 min and on demand)
+# Compatible with: agentskills.io v0.1 schema (Hermes Agent native)
+
+name: check_research_visibility
+version: 1.0.0
+description: |
+  Browser-tour through Sergei's research-visibility surface to detect new
+  events worth reacting to. Reads OpenAlex author page, GitHub repos, figshare
+  author profile. Emits structured events to state.sqlite for the Strategist
+  to evaluate next cycle.
+
+  This is a NO-LLM skill — pure HTTP/browser navigation + diff against last snapshot.
+
+audience: agent-internal
+category: monitoring
+estimated_duration_seconds: 60
+estimated_cost_usd: 0.00
+
+inputs:
+  - name: openalex_author_id
+    type: string
+    default: A5127404993
+    description: OpenAlex author entity ID
+  - name: github_username
+    type: string
+    default: SergeySolovyev
+  - name: figshare_author_id
+    type: string
+    default: "23264342"
+  - name: lookback_hours
+    type: integer
+    default: 24
+    description: Detect events newer than this
+
+outputs:
+  - name: events
+    type: list
+    description: |
+      Structured events to insert into state.sqlite. Each event:
+      {
+        source: openalex|github|figshare,
+        kind: citation|star|download|fork|view_milestone,
+        subject: <doi or repo url or paper title>,
+        delta: <numeric change>,
+        severity: low|medium|high,
+        timestamp: ISO8601,
+        raw: <original payload>
+      }
+
+tools_required:
+  - http (read-only)
+  - sqlite (read previous snapshot + write events)
+
+procedure:
+  - step: "Fetch OpenAlex author profile"
+    action: http_get
+    url: "https://api.openalex.org/authors/{{ inputs.openalex_author_id }}"
+    headers:
+      User-Agent: "sergei-brand-agent/{{ env.OPENALEX_POLITE_EMAIL }}"
+    capture: openalex_author
+
+  - step: "Fetch OpenAlex works for this author"
+    action: http_get
+    url: "https://api.openalex.org/works?filter=author.id:{{ inputs.openalex_author_id }}&per-page=50&select=id,doi,title,cited_by_count,counts_by_year,publication_date"
+    capture: openalex_works
+
+  - step: "Diff against last snapshot to find new citations"
+    action: python_inline
+    code: |
+      previous = state.get("openalex_snapshot")
+      current = {w["id"]: w["cited_by_count"] for w in openalex_works["results"]}
+      events = []
+      if previous:
+          for work_id, current_count in current.items():
+              prev_count = previous.get(work_id, 0)
+              if current_count > prev_count:
+                  events.append({
+                      "source": "openalex",
+                      "kind": "citation",
+                      "subject": work_id,
+                      "delta": current_count - prev_count,
+                      "severity": "high" if (current_count - prev_count) >= 3 else "medium",
+                      "raw": {"work_id": work_id, "prev": prev_count, "curr": current_count}
+                  })
+      state.set("openalex_snapshot", current)
+
+  - step: "Fetch GitHub stars on owned repos"
+    action: http_get
+    url: "https://api.github.com/users/{{ inputs.github_username }}/repos?type=owner&sort=updated&per_page=30"
+    headers:
+      Accept: application/vnd.github+json
+      Authorization: "Bearer {{ env.GITHUB_TOKEN }}"
+    capture: github_repos
+
+  - step: "Diff star counts to detect new stars"
+    action: python_inline
+    code: |
+      previous = state.get("github_stars_snapshot") or {}
+      current = {r["name"]: r["stargazers_count"] for r in github_repos if not r["fork"]}
+      for repo, stars in current.items():
+          prev = previous.get(repo, 0)
+          if stars > prev:
+              events.append({
+                  "source": "github",
+                  "kind": "star",
+                  "subject": f"https://github.com/{{ inputs.github_username }}/{repo}",
+                  "delta": stars - prev,
+                  "severity": "low" if (stars - prev) == 1 else "medium",
+                  "raw": {"repo": repo, "prev": prev, "curr": stars}
+              })
+      state.set("github_stars_snapshot", current)
+
+  - step: "Fetch figshare author articles"
+    action: http_get
+    url: "https://api.figshare.com/v2/articles?author={{ inputs.figshare_author_id }}&page_size=20"
+    capture: figshare_articles
+
+  - step: "Diff figshare view/download counts"
+    action: python_inline
+    code: |
+      previous = state.get("figshare_metrics_snapshot") or {}
+      current = {}
+      for art in figshare_articles:
+          art_id = str(art.get("id"))
+          # figshare /articles list endpoint doesn't include views/downloads;
+          # fetch detail only if last check >6h ago to save quota
+          last_checked = state.get(f"figshare_last_check_{art_id}", 0)
+          if (now() - last_checked) > 6*3600:
+              detail = http_get(f"https://api.figshare.com/v2/articles/{art_id}/statistics")
+              current[art_id] = {
+                  "views": detail.get("views", 0),
+                  "downloads": detail.get("downloads", 0)
+              }
+              state.set(f"figshare_last_check_{art_id}", now())
+      for art_id, metrics in current.items():
+          prev = previous.get(art_id, {})
+          v_delta = metrics["views"] - prev.get("views", 0)
+          d_delta = metrics["downloads"] - prev.get("downloads", 0)
+          if d_delta >= 5:   # 5+ new downloads = notable
+              events.append({
+                  "source": "figshare",
+                  "kind": "download_milestone",
+                  "subject": art_id,
+                  "delta": d_delta,
+                  "severity": "medium" if d_delta < 20 else "high",
+                  "raw": metrics
+              })
+      state.merge("figshare_metrics_snapshot", current)
+
+  - step: "Persist events to state.sqlite for Strategist consumption"
+    action: sqlite_exec
+    query: |
+      INSERT INTO events (source, kind, subject, delta, severity, ts, raw)
+      VALUES (:source, :kind, :subject, :delta, :severity, :timestamp, :raw)
+    rows: events
+
+  - step: "Return summary"
+    action: return
+    value:
+      events_count: "{{ len(events) }}"
+      events: "{{ events }}"
+      sources_polled: [openalex, github, figshare]
+
+error_handling:
+  - on: http_4xx
+    action: log_warn_continue
+  - on: http_5xx
+    action: retry_with_backoff
+    max_retries: 2
+  - on: sqlite_error
+    action: log_error_escalate
+    notify: telegram
+  - on: rate_limit
+    action: sleep_and_retry
+    sleep_seconds: 60
+
+cron: "*/30 * * * *"   # every 30 min
+
+# When NOT to invoke
+guards:
+  - skip_if: state.emergency_pause == true
+  - skip_if: state.daily_api_calls > 500   # cost protection

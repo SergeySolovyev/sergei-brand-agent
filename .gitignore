@@ -1,0 +1,86 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.template
+*.key
+*.pem
+secrets/
+credentials/
+.password-store/
+
+# Hermes state
+.hermes/
+state.sqlite
+state.sqlite-journal
+state.sqlite-wal
+state.sqlite-shm
+
+# Browser profiles (cookies, sessions)
+browser-profile/
+playwright-data/
+.cache/
+.chromium/
+
+# Traces & runtime data
+data/traces/*
+!data/traces/.gitkeep
+data/drafts/*
+!data/drafts/.gitkeep
+data/pulse/*
+!data/pulse/.gitkeep
+data/plans/*
+!data/plans/.gitkeep
+
+# Knowledge base ingested files (generated)
+knowledge_base/identity.json
+knowledge_base/preprints.json
+knowledge_base/brand_voice_corpus.md
+# (glossary.md and promotion_playbook.md ARE committed — manual content)
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log
+.pnpm-debug.log
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# OS
+*.tmp
+*~
+.~lock.*
+
+# Local override scripts
+scripts/local-*
+scripts/*.local.*
