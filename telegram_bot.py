@@ -232,6 +232,37 @@ async def cmd_resume(update: Update, _: ContextTypes.DEFAULT_TYPE):
 
 
 @require_auth
+async def cmd_ack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Acknowledge a CRITICAL event so OpenClaw stops re-pinging."""
+    if not context.args:
+        await update.message.reply_text("Usage: /ack <slug>")
+        return
+    slug = context.args[0]
+    with db() as conn:
+        row = conn.execute(
+            "SELECT slug, kind, title, severity FROM ack_pending "
+            "WHERE slug = ? AND acked_at IS NULL",
+            (slug,),
+        ).fetchone()
+        if not row:
+            await update.message.reply_text(
+                f"No pending critical event matching `{slug}` (already acked or expired)",
+                parse_mode="Markdown",
+            )
+            return
+        conn.execute(
+            "UPDATE ack_pending SET acked_at = ?, acked_by = ? WHERE slug = ?",
+            (datetime.now(timezone.utc).isoformat(),
+             update.effective_user.username or str(update.effective_user.id),
+             slug),
+        )
+    await update.message.reply_text(
+        f"✅ ACKed: *{row['kind']}* — {row['title']}\nRetry loop stopped.",
+        parse_mode="Markdown",
+    )
+
+
+@require_auth
 async def cmd_digest(update: Update, _: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Queuing weekly_digest...")
     # In production, push an event the scheduler picks up
@@ -269,6 +300,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("approve", cmd_approve))
     app.add_handler(CommandHandler("reject", cmd_reject))
+    app.add_handler(CommandHandler("ack", cmd_ack))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("digest", cmd_digest))

@@ -1,0 +1,210 @@
+# Skill: emit_critical_event
+# Adopted dual-channel pattern (git + telegram with retry-until-ack).
+# Source: user's Hermes architecture lessons learned, 2026-05-27.
+#
+# This is THE choke-point for all event emission. Every skill that produces
+# a notification routes through here. Single point of truth for severity
+# classification + dual-channel delivery.
+
+name: emit_critical_event
+version: 1.0.0
+description: |
+  Emit an event with severity-based dual-channel routing.
+
+  Hard contract:
+    1. ALWAYS git commit first (durable record, even if Telegram fails)
+    2. THEN telegram push (real-time delivery, may fail)
+    3. For CRITICAL: retry telegram every 30 min until Sergei /ack
+    4. For HIGH/CRITICAL: append to audit/events.jsonl
+
+  Why git-first ordering: Telegram is best-effort, ephemeral. Git is the
+  source of truth. If we push to Telegram first and git fails, we lose
+  durable record. If git succeeds and Telegram fails, we can replay.
+
+audience: agent-internal
+category: escalation
+estimated_duration_seconds: 4
+estimated_cost_usd: 0.00
+
+inputs:
+  - name: kind
+    type: string
+    required: true
+    description: "Event kind, e.g. citation_discovered, draft_ready, deadline_approaching"
+  - name: severity
+    type: string
+    enum: [low, medium, high, critical]
+    required: true
+  - name: title
+    type: string
+    required: true
+    description: "One-line headline for the event"
+  - name: body
+    type: string
+    required: true
+    description: "Full markdown body; will be the contents of reports/inbox/ file"
+  - name: slug
+    type: string
+    description: "URL-safe identifier; defaults to slugified title"
+  - name: suggested_actions
+    type: list[string]
+    description: "Things Sergei could approve (e.g. ['reply', 'archive', 'compose_followup'])"
+
+outputs:
+  - name: inbox_url
+    type: string
+    description: "GitHub URL of the committed event file"
+  - name: telegram_message_id
+    type: integer
+  - name: ack_required
+    type: boolean
+
+tools_required:
+  - filesystem
+  - sqlite
+  - http
+  - secret:TELEGRAM_BOT_TOKEN
+  - secret:REPORTS_REPO_DEPLOY_KEY
+
+procedure:
+  - step: "Load severity routing config"
+    action: read_file
+    path: "/workspace/sergei-brand-agent-reports/severity_routing.yaml"
+    parse: yaml
+    capture: routing
+
+  - step: "Derive slug + filename"
+    action: python_inline
+    code: |
+      import re, time
+      slug = inputs.slug or re.sub(r'[^a-z0-9-]+', '-',
+                                    inputs.title.lower().replace(' ', '-'))[:50]
+      unix = int(time.time())
+      iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(unix))
+      date = time.strftime('%Y-%m-%d', time.gmtime(unix))
+      if inputs.severity in ('high', 'critical'):
+          filepath = f"reports/inbox/{unix}_{inputs.kind}_{slug}.md"
+          mode = "create"
+      else:
+          filepath = f"reports/daily/{date}.md"
+          mode = "append"
+
+  - step: "STEP 1 (durable): write event to reports repo + git commit"
+    action: shell
+    command: |
+      set -euo pipefail
+      cd /workspace/sergei-brand-agent-reports
+      git pull --quiet origin main || true
+
+      if [ "{{ mode }}" = "create" ]; then
+          mkdir -p "$(dirname {{ filepath }})"
+          cat > {{ filepath }} <<'EOF_EVENT'
+      ---
+      unix: {{ unix }}
+      kind: {{ inputs.kind }}
+      severity: {{ inputs.severity }}
+      detected_at: {{ iso }}
+      ---
+      # {{ inputs.title }}
+
+      {{ inputs.body }}
+
+      ## Suggested actions
+      {% for action in inputs.suggested_actions %}
+      - `/approve {{ slug }}-{{ action }}` — {{ action }}
+      {% endfor %}
+      EOF_EVENT
+      else
+          # Append to daily digest
+          mkdir -p "$(dirname {{ filepath }})"
+          if [ ! -f {{ filepath }} ]; then
+              echo "# Daily digest {{ date }}" > {{ filepath }}
+              echo "" >> {{ filepath }}
+          fi
+          cat >> {{ filepath }} <<'EOF_EVENT'
+
+      ## [{{ iso }}] {{ inputs.kind }}: {{ inputs.title }}
+
+      {{ inputs.body }}
+      EOF_EVENT
+      fi
+
+      git add {{ filepath }}
+      git -c user.name="openclaw-agent" -c user.email="agent@sergeisolovev.com" \
+        commit -m "{{ inputs.severity }}: {{ inputs.kind }} — {{ inputs.title | truncate(60) }}"
+      git push origin main
+    capture: git_result
+
+  - step: "STEP 1b (audit): append to events.jsonl"
+    action: shell
+    when: "inputs.severity in ('high', 'critical')"
+    command: |
+      cd /workspace/sergei-brand-agent-reports
+      MONTH=$(date -u +%Y-%m)
+      mkdir -p audit/$MONTH
+      cat >> audit/$MONTH/events.jsonl <<EOF_LINE
+      {"unix": {{ unix }}, "iso": "{{ iso }}", "kind": "{{ inputs.kind }}", "severity": "{{ inputs.severity }}", "slug": "{{ slug }}", "title": "{{ inputs.title }}", "filepath": "{{ filepath }}"}
+      EOF_LINE
+      git add audit/$MONTH/events.jsonl
+      git -c user.name="openclaw-agent" -c user.email="agent@sergeisolovev.com" \
+        commit -m "audit: log {{ inputs.kind }}" --quiet
+      git push origin main --quiet
+
+  - step: "STEP 2 (real-time): Telegram push if severity warrants"
+    action: http_post
+    when: "inputs.severity in ('high', 'critical') and routing.severities[inputs.severity].telegram.enabled"
+    url: "https://api.telegram.org/bot{{ secret.TELEGRAM_BOT_TOKEN }}/sendMessage"
+    json:
+      chat_id: "{{ env.TELEGRAM_HOME_CHANNEL }}"
+      text: |
+        {{ '🚨 CRITICAL' if inputs.severity == 'critical' else '🔔' }} {{ inputs.kind }}: {{ inputs.title }}
+
+        {{ inputs.body | truncate(500) }}
+
+        Details: https://github.com/SergeySolovyev/sergei-brand-agent-reports/blob/main/{{ filepath }}
+
+        {% if inputs.severity == 'critical' %}
+        ACK by reply: /ack {{ slug }}
+        {% endif %}
+      parse_mode: Markdown
+      disable_web_page_preview: false
+    capture: tg_response
+
+  - step: "STEP 3 (CRITICAL only): schedule retry loop"
+    action: sqlite_exec
+    when: "inputs.severity == 'critical'"
+    query: |
+      INSERT INTO ack_pending
+      (slug, kind, title, severity, telegram_message_id, first_sent_at,
+       last_retry_at, retry_count, max_retries, give_up_at)
+      VALUES (:slug, :kind, :title, 'critical', :tg_mid, :now, :now, 0, 6,
+              datetime(:now, '+4 hours'))
+    bind:
+      slug: "{{ slug }}"
+      kind: "{{ inputs.kind }}"
+      title: "{{ inputs.title }}"
+      tg_mid: "{{ tg_response.result.message_id if tg_response else null }}"
+      now: "{{ iso }}"
+
+  - step: "Return"
+    action: return
+    value:
+      inbox_url: "https://github.com/SergeySolovyev/sergei-brand-agent-reports/blob/main/{{ filepath }}"
+      telegram_message_id: "{{ tg_response.result.message_id if tg_response else null }}"
+      ack_required: "{{ inputs.severity == 'critical' }}"
+
+error_handling:
+  - on: shell_error_git_push
+    action: log_error_continue
+    note: "Git push failed; will retry on next cron tick. Event is committed locally."
+  - on: http_4xx_telegram
+    action: log_error_continue
+    note: "Telegram delivery failed. Event still in git for next session pull."
+  - on: rate_limit_telegram
+    action: sleep_and_retry
+    sleep_seconds: 60
+
+# Cron tick checks ack_pending every 30 min and re-sends critical alerts
+# whose retry_count < max_retries and now < give_up_at.
+
+tier: 1   # internal, no public surface

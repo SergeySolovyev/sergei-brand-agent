@@ -226,6 +226,29 @@ SCHEMA = [
       replied_at TEXT
     )
     """,
+    # ── CRITICAL events awaiting Sergei /ack (retry loop until acknowledged) ──
+    """
+    CREATE TABLE IF NOT EXISTS ack_pending (
+      slug TEXT PRIMARY KEY,
+      kind TEXT,
+      title TEXT,
+      severity TEXT CHECK(severity == 'critical'),
+      telegram_message_id TEXT,
+      first_sent_at TEXT,
+      last_retry_at TEXT,
+      retry_count INTEGER DEFAULT 0,
+      max_retries INTEGER DEFAULT 6,
+      give_up_at TEXT,
+      acked_at TEXT,
+      acked_by TEXT
+    )
+    """,
+    # Index for cron tick "find pending alerts due for retry"
+    """
+    CREATE INDEX IF NOT EXISTS idx_ack_pending_due
+      ON ack_pending(acked_at, last_retry_at)
+      WHERE acked_at IS NULL
+    """,
 ]
 
 
