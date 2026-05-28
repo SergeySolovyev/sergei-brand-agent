@@ -1,0 +1,202 @@
+#!/opt/brand-agent/venv/bin/python3
+"""ru_grants_scanner — Russian science grants discovery (РНФ + ФСИ + Минобр).
+
+Sources:
+- rscf.ru news (РНФ — Russian Science Foundation)
+- fasie.ru news (Фонд содействия инновациям, ex-Бортник)
+- minobrnauki.gov.ru/press-center/news
+
+Cron: Tue 09:00 UTC weekly.
+
+Hardcoded recurring programs (deadlines updated quarterly):
+- UMNIK (ФСИ): 2 cycles/year, ~март и сентябрь
+- РНФ малые группы: годовой конкурс, deadline обычно ноябрь
+- РНФ молодые ученые: годовой, ~апрель
+- Постановление 218 (Минобр): ad-hoc
+
+Filter: keywords matching ML/blockchain/finance/AI agent area.
+"""
+import json
+import re
+import sqlite3
+import subprocess
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+STATE_DB = Path("/root/.openclaw/agent_state.sqlite")
+
+KEYWORDS_RU = [
+    "блокчейн", "искусственный интеллект", "ии ", "ai ", "ml",
+    "машинн", "цифров", "финанс", "криптовалют", "распределенн",
+    "молодой ученый", "молодых ученых", "грант", "конкурс",
+    "young scientist", "blockchain", "decentralized",
+]
+
+# Annual recurring programs — agent reminds about deadlines
+RECURRING = [
+    {
+        "name": "УМНИК (ФСИ)",
+        "next_deadline": "2026-09-15",  # autumn cycle
+        "url": "https://fasie.ru/programs/umnik/",
+        "amount_rub": 500000,
+        "for_whom": "young researchers up to 30, scientific-technical projects",
+    },
+    {
+        "name": "РНФ — малые отдельные научные группы (конкурс 2026)",
+        "next_deadline": "2026-11-15",
+        "url": "https://rscf.ru/contests/search/",
+        "amount_rub": 12000000,  # ~12M over 2 years
+        "for_whom": "small research teams (4-10 people), 2-year project",
+    },
+    {
+        "name": "РНФ — молодые ученые отдельный конкурс",
+        "next_deadline": "2026-09-30",
+        "url": "https://rscf.ru/contests/search/",
+        "amount_rub": 6000000,
+        "for_whom": "individual researchers under 33, 2-year project",
+    },
+    {
+        "name": "СТАРТ (ФСИ) — НТИ",
+        "next_deadline": "2026-08-31",
+        "url": "https://fasie.ru/programs/programm-start/",
+        "amount_rub": 5000000,
+        "for_whom": "early-stage tech startups, 1-2 year",
+    },
+]
+
+
+def _db():
+    conn = sqlite3.connect(STATE_DB)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ru_grants_seen (
+            grant_id TEXT PRIMARY KEY,
+            title TEXT,
+            deadline TEXT,
+            url TEXT,
+            first_seen TEXT
+        )
+        """
+    )
+    return conn
+
+
+def fetch_text(url):
+    try:
+        req = urllib.request.Request(
+            url, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+                "Accept-Language": "ru,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"fetch failed {url}: {e}")
+        return ""
+
+
+def scan_rscf():
+    """РНФ — heuristic: look for /news/ items with grant keywords."""
+    body = fetch_text("https://rscf.ru/news/")
+    matches = re.findall(
+        r'href="(/news/[^"]+)"[^>]*>([^<]{30,200})</a>', body,
+    )
+    out = []
+    for href, title in matches[:20]:
+        if any(k in title.lower() for k in KEYWORDS_RU):
+            out.append({
+                "name": title.strip(),
+                "url": f"https://rscf.ru{href}",
+                "source": "rscf.ru",
+            })
+    return out
+
+
+def scan_fasie():
+    body = fetch_text("https://fasie.ru/press/news/")
+    matches = re.findall(
+        r'<a[^>]+href="(/press/news/[^"]+)"[^>]*>([^<]{30,200})</a>', body,
+    )
+    out = []
+    for href, title in matches[:20]:
+        if any(k in title.lower() for k in KEYWORDS_RU):
+            out.append({
+                "name": title.strip(),
+                "url": f"https://fasie.ru{href}",
+                "source": "fasie.ru",
+            })
+    return out
+
+
+def emit_grant(g: dict) -> None:
+    title = g.get("name", "?")
+    body = (
+        f"Title: {title}\n"
+        f"URL: {g.get('url', '?')}\n"
+        f"Source: {g.get('source', '?')}\n"
+    )
+    if g.get("next_deadline"):
+        body += f"Deadline: {g['next_deadline']}\n"
+    if g.get("amount_rub"):
+        body += f"Amount: {g['amount_rub']:,} ₽\n"
+    if g.get("for_whom"):
+        body += f"For: {g['for_whom']}\n"
+    subprocess.run(
+        ["/usr/local/bin/emit_event", "high", "grant_discovered",
+         f"🇷🇺 {title[:60]}", body],
+        check=False,
+    )
+
+
+def main():
+    conn = _db()
+    found = 0
+    today = datetime.utcnow().date()
+
+    # Hardcoded recurring programs — emit if upcoming within 90 days
+    for r in RECURRING:
+        try:
+            d = datetime.fromisoformat(r["next_deadline"]).date()
+        except Exception:
+            continue
+        days = (d - today).days
+        if days < 0 or days > 90:
+            continue
+        r["source"] = "recurring-cycle"
+        grant_id = (r["name"] + "|" + r["next_deadline"]).lower()
+        if conn.execute(
+            "SELECT 1 FROM ru_grants_seen WHERE grant_id=?", (grant_id,),
+        ).fetchone():
+            continue
+        emit_grant(r)
+        conn.execute(
+            "INSERT INTO ru_grants_seen VALUES (?, ?, ?, ?, ?)",
+            (grant_id, r["name"], r["next_deadline"], r["url"],
+             datetime.now(timezone.utc).isoformat()),
+        )
+        found += 1
+
+    # Live scrapers
+    for g in scan_rscf() + scan_fasie():
+        grant_id = g["url"]
+        if conn.execute(
+            "SELECT 1 FROM ru_grants_seen WHERE grant_id=?", (grant_id,),
+        ).fetchone():
+            continue
+        emit_grant(g)
+        conn.execute(
+            "INSERT INTO ru_grants_seen VALUES (?, ?, ?, ?, ?)",
+            (grant_id, g["name"], g.get("next_deadline", ""), g["url"],
+             datetime.now(timezone.utc).isoformat()),
+        )
+        found += 1
+
+    conn.commit()
+    conn.close()
+    print(f"ru_grants_scanner: found_new={found}")
+
+
+if __name__ == "__main__":
+    main()

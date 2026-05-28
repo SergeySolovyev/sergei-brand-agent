@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""agent_pulse — 30-min status ping to Telegram.
+
+Proof of life. Reads SQLite tables + cron log files + systemd statuses,
+formats compact Russian summary, sends via tg_send.
+
+Quiet hours (00:00-07:00 MSK): suppresses ping if nothing meaningful changed
+to avoid waking Sergei. Always sends during 07:00-23:00 MSK.
+
+State snapshot delta since last pulse stored in `pulse_state` table to compute
+"new since last pulse" counts.
+"""
+import json
+import os
+import sqlite3
+import subprocess
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+STATE_DB = Path("/root/.openclaw/agent_state.sqlite")
+PULSE_DB = Path("/root/.openclaw/pulse_state.sqlite")
+
+
+def _msk_hour() -> int:
+    """Current hour in MSK timezone (UTC+3)."""
+    return (datetime.utcnow() + timedelta(hours=3)).hour
+
+
+def _q(db, sql, args=()):
+    try:
+        return db.execute(sql, args).fetchall()
+    except Exception:
+        return []
+
+
+def _last_snapshot() -> dict:
+    PULSE_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(PULSE_DB)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS snapshot (key TEXT PRIMARY KEY, value INTEGER, ts TEXT)"
+    )
+    rows = conn.execute("SELECT key, value FROM snapshot").fetchall()
+    conn.close()
+    return {k: v for k, v in rows}
+
+
+def _save_snapshot(snap: dict) -> None:
+    conn = sqlite3.connect(PULSE_DB)
+    now = datetime.now(timezone.utc).isoformat()
+    for k, v in snap.items():
+        conn.execute(
+            "INSERT OR REPLACE INTO snapshot VALUES (?, ?, ?)", (k, v, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def collect() -> tuple[dict, list[str]]:
+    """Return (snapshot, lines) — snapshot for delta-tracking, lines for body."""
+    db = sqlite3.connect(STATE_DB)
+    db.row_factory = sqlite3.Row
+    snap = {}
+    lines = []
+
+    # ---- Gmail triage stats ----
+    gmail_total = _q(db, "SELECT COUNT(*) FROM gmail_seen")
+    gmail_total = gmail_total[0][0] if gmail_total else 0
+    snap["gmail_seen_total"] = gmail_total
+
+    # ---- Mention events emitted (last 24h) ----
+    # We approximate via deadline_emit_log + manual count from /opt/reports/audit
+    audit_dir = Path("/opt/reports/audit") / datetime.utcnow().strftime("%Y-%m")
+    audit_file = audit_dir / "events.jsonl"
+    audit_total = 0
+    if audit_file.exists():
+        audit_total = sum(1 for _ in open(audit_file))
+    snap["audit_events_total"] = audit_total
+
+    # ---- Registrations ----
+    regs = _q(db, "SELECT status, COUNT(*) FROM registrations GROUP BY status")
+    reg_by_status = {r[0]: r[1] for r in regs}
+    snap["reg_submitted"] = reg_by_status.get("submitted", 0)
+    snap["reg_filled_no_submit"] = reg_by_status.get("filled_no_submit", 0)
+
+    # ---- Drafts (replies awaiting send) ----
+    drafts = _q(db, "SELECT status, COUNT(*) FROM drafts GROUP BY status")
+    draft_by_status = {r[0]: r[1] for r in drafts}
+    snap["draft_pending"] = draft_by_status.get("pending", 0)
+    snap["draft_sent"] = draft_by_status.get("sent", 0)
+
+    # ---- Discoveries (hackathons / grants found) ----
+    discoveries = _q(db, "SELECT COUNT(*) FROM discoveries")
+    snap["discoveries_total"] = discoveries[0][0] if discoveries else 0
+
+    # ---- Event actions (button clicks Sergei made) ----
+    actions = _q(db, "SELECT action, COUNT(*) FROM event_actions GROUP BY action")
+    snap["actions_total"] = sum(a[1] for a in actions)
+
+    # ---- Service health ----
+    svc_status = {}
+    for svc in ("brand-agent-bot", "telegram-user-monitor"):
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", svc],
+                capture_output=True, text=True, timeout=3,
+            )
+            svc_status[svc] = r.stdout.strip()
+        except Exception:
+            svc_status[svc] = "unknown"
+
+    # ---- Build body lines ----
+    prev = _last_snapshot()
+
+    def delta(key: str) -> int:
+        return snap.get(key, 0) - prev.get(key, 0)
+
+    lines.append(
+        f"📧 Gmail: {snap['gmail_seen_total']} processed "
+        f"(+{delta('gmail_seen_total')} since last pulse)"
+    )
+    lines.append(
+        f"🔔 Events emitted: {audit_total} this month "
+        f"(+{delta('audit_events_total')} since last pulse)"
+    )
+    if snap["actions_total"] > 0:
+        lines.append(
+            f"🎛 Your button taps: {snap['actions_total']} total "
+            f"(+{delta('actions_total')} since last pulse)"
+        )
+    if snap["reg_submitted"] > 0 or snap["reg_filled_no_submit"] > 0:
+        lines.append(
+            f"📝 Registrations: {snap['reg_submitted']} submitted, "
+            f"{snap['reg_filled_no_submit']} stuck (need wallet/CV)"
+        )
+    if snap["draft_pending"] > 0:
+        lines.append(
+            f"📨 Drafts awaiting your /approve: {snap['draft_pending']}"
+        )
+
+    # Service health line
+    health = []
+    for svc, st in svc_status.items():
+        emoji = "✓" if st == "active" else "✗"
+        short = svc.replace("brand-agent-bot", "bot").replace(
+            "telegram-user-monitor", "tg-user"
+        )
+        health.append(f"{emoji} {short}")
+    lines.append(f"🤖 Services: {' · '.join(health)}")
+
+    # Deadlines countdown
+    today = datetime.utcnow().date()
+    deadlines = []
+    deadline_emit = _q(
+        db, "SELECT deadline_id FROM deadline_emit_log GROUP BY deadline_id"
+    )
+    # We don't store the actual deadline date in deadline_emit_log;
+    # for now keep this static reminder from knowledge_base default
+    static_deadlines = [
+        ("Интернаука", "2026-06-02"),
+        ("AIRI app", "2026-06-15"),
+        ("CFA-8 attend", "2026-06-23"),
+        ("МФТИ Master", "2026-07-31"),
+    ]
+    near = [(n, d) for n, d in static_deadlines
+            if (datetime.fromisoformat(d).date() - today).days < 30]
+    if near:
+        bits = []
+        for n, d in near:
+            days = (datetime.fromisoformat(d).date() - today).days
+            bits.append(f"{n} {days}d")
+        lines.append(f"⏰ Deadlines: {' · '.join(bits)}")
+
+    db.close()
+    return snap, lines
+
+
+def main() -> int:
+    hour_msk = _msk_hour()
+    snap, lines = collect()
+
+    # Compute is_quiet — but always run on first 5 min of each hour
+    prev = _last_snapshot()
+    is_quiet_hour = 0 <= hour_msk < 7
+    any_delta = any(
+        snap.get(k, 0) != prev.get(k, 0)
+        for k in ("gmail_seen_total", "audit_events_total",
+                  "actions_total", "draft_pending")
+    )
+    if is_quiet_hour and not any_delta:
+        # Skip silent pings at night
+        _save_snapshot(snap)
+        return 0
+
+    header = f"🤖 Pulse {datetime.utcnow().strftime('%H:%M')} UTC"
+    body = header + "\n\n" + "\n".join(lines)
+    subprocess.run(["/usr/local/bin/tg_send", body], check=False)
+
+    _save_snapshot(snap)
+    return 0
+
+
+if __name__ == "__main__":
+    main()

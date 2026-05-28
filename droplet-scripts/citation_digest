@@ -1,0 +1,194 @@
+#!/opt/brand-agent/venv/bin/python3
+"""citation_digest — weekly OpenAlex citation roll-up.
+
+Cron Sunday 18:00 UTC. Pulls cited-by metadata for Sergei's 5 figshare works
++ OpenAlex author profile, identifies new citing authors since last digest,
+formats markdown report. Tags potential outreach targets.
+
+Output:
+  /opt/reports/digests/{YYYY-MM-DD}-citations.md (git-tracked)
+  Telegram summary with [Outreach to <author>] / [Skip] buttons per VIP
+
+State: cited_by snapshots in agent_state.sqlite
+"""
+import json
+import sqlite3
+import subprocess
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+OPENALEX_AUTHOR_ID = "A5127404993"  # Sergei Solovev
+STATE_DB = Path("/root/.openclaw/agent_state.sqlite")
+DIGEST_DIR = Path("/opt/reports/digests")
+VIP_FILE = Path("/opt/brand-agent/knowledge_base/vip_authors.json")
+
+
+def _db():
+    conn = sqlite3.connect(STATE_DB)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS citation_history (
+            work_id TEXT,
+            citing_author_id TEXT,
+            citing_title TEXT,
+            first_seen TEXT,
+            PRIMARY KEY (work_id, citing_author_id)
+        )
+        """
+    )
+    return conn
+
+
+def _load_vips() -> set:
+    if not VIP_FILE.exists():
+        return set()
+    try:
+        data = json.loads(VIP_FILE.read_text())
+    except Exception:
+        return set()
+    handles = set()
+    for tier_name, entries in data.items():
+        if tier_name.startswith("_") or tier_name == "domain_terms_critical":
+            continue
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            h = (e.get("handle") or "").lower()
+            if h:
+                handles.add(h)
+    return handles
+
+
+def http_json(url):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "sergei-brand-agent citation-digest"},
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read())
+
+
+def fetch_works():
+    data = http_json(
+        f"https://api.openalex.org/works?filter=author.id:{OPENALEX_AUTHOR_ID}"
+        f"&per-page=50&select=id,doi,title,cited_by_count,cited_by_api_url"
+    )
+    return data.get("results", [])
+
+
+def fetch_citing(cited_by_url):
+    if not cited_by_url:
+        return []
+    data = http_json(
+        f"{cited_by_url}&per-page=25&select=id,doi,title,authorships,publication_year"
+    )
+    return data.get("results", [])
+
+
+def main():
+    conn = _db()
+    works = fetch_works()
+    new_citations = []
+    vips = _load_vips()
+
+    for w in works:
+        wid = w["id"]
+        citing = fetch_citing(w.get("cited_by_api_url"))
+        for c in citing:
+            for authorship in c.get("authorships", []) or []:
+                author = authorship.get("author") or {}
+                aid = author.get("id", "")
+                aname = author.get("display_name", "")
+                if not aid:
+                    continue
+                # Dedup
+                existing = conn.execute(
+                    "SELECT 1 FROM citation_history WHERE work_id=? AND citing_author_id=?",
+                    (wid, aid),
+                ).fetchone()
+                if existing:
+                    continue
+                conn.execute(
+                    "INSERT INTO citation_history VALUES (?, ?, ?, ?)",
+                    (wid, aid, c.get("title", "")[:200],
+                     datetime.now(timezone.utc).isoformat()),
+                )
+                # VIP match
+                is_vip = aname.lower() in vips or any(
+                    v in aname.lower() for v in vips
+                )
+                new_citations.append({
+                    "work": w.get("title", "")[:100],
+                    "work_doi": w.get("doi", ""),
+                    "citing_title": c.get("title", "")[:160],
+                    "citing_doi": c.get("doi", ""),
+                    "citing_author": aname,
+                    "citing_year": c.get("publication_year", "?"),
+                    "is_vip": is_vip,
+                })
+    conn.commit()
+    conn.close()
+
+    # Format digest
+    DIGEST_DIR.mkdir(parents=True, exist_ok=True)
+    today = datetime.utcnow().date().isoformat()
+    digest_file = DIGEST_DIR / f"{today}-citations.md"
+
+    if not new_citations:
+        body = f"# Citation digest — {today}\n\nNo new citations this week.\n"
+    else:
+        lines = [f"# Citation digest — {today}\n",
+                 f"**{len(new_citations)} new citations** found.\n"]
+        # Group by cited work
+        by_work = {}
+        for c in new_citations:
+            by_work.setdefault(c["work"], []).append(c)
+        for work_title, cites in by_work.items():
+            lines.append(f"\n## {work_title}\n")
+            for c in cites:
+                vip_tag = " 🌟 **VIP**" if c["is_vip"] else ""
+                lines.append(
+                    f"- **{c['citing_author']}** ({c['citing_year']}){vip_tag}\n"
+                    f"  - _{c['citing_title']}_\n"
+                    f"  - DOI: {c['citing_doi'] or '—'}\n"
+                )
+        body = "\n".join(lines)
+    digest_file.write_text(body, encoding="utf-8")
+
+    # Commit
+    try:
+        subprocess.run(
+            ["git", "-C", "/opt/reports", "add", str(digest_file.relative_to("/opt/reports"))],
+            check=False,
+        )
+        subprocess.run(
+            ["git", "-C", "/opt/reports", "-c", "user.name=openclaw-agent",
+             "-c", "user.email=agent@sergeisolovev.com",
+             "commit", "-m", f"citation digest {today}", "--quiet"],
+            check=False,
+        )
+        subprocess.run(["git", "-C", "/opt/reports", "push", "--quiet"], check=False)
+    except Exception:
+        pass
+
+    # TG ping
+    if new_citations:
+        vip_count = sum(1 for c in new_citations if c["is_vip"])
+        summary = (
+            f"📊 *Citation digest — {today}*\n\n"
+            f"{len(new_citations)} new citations this week\n"
+            f"🌟 VIP citers: {vip_count}\n\n"
+            f"Full report:\nhttps://github.com/SergeySolovyev/sergei-brand-agent-reports/blob/main/digests/{today}-citations.md"
+        )
+        subprocess.run(["/usr/local/bin/tg_send", summary], check=False)
+    else:
+        # Quiet — only commit, no TG noise for empty weeks
+        pass
+
+    print(f"citation digest: new={len(new_citations)} → {digest_file}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

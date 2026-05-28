@@ -63,6 +63,14 @@ async def _on_new_message(event):
         return
 
     sender = await event.get_sender()
+
+    # Hard filter: ignore ALL bots. Prevents feedback loop where our own
+    # sergei_brand_agent_bot sends a notification → Telethon catches it as
+    # incoming DM → triages → emits another mention → bot sends another...
+    # Real human conversations come from real users. Bots = transactional noise.
+    if isinstance(sender, User) and getattr(sender, "bot", False):
+        return
+
     sender_name = ""
     if isinstance(sender, User):
         sender_name = (

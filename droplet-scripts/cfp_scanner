@@ -1,0 +1,177 @@
+#!/opt/brand-agent/venv/bin/python3
+"""cfp_scanner — academic CFP + finance conference deadline aggregator.
+
+Sources:
+- aideadlin.es (raw GitHub YAML — actively maintained ML/AI deadline list)
+- wikicfp.com RSS for "blockchain" / "DeFi" / "smart contract" tags
+- Fallback: hardcoded finance ML conference dates (HKICCG, FBM, FCM, FFC)
+
+Filter: keywords matching Sergei's research area + deadline within next 6 months.
+Emit: high severity → /opt/reports/inbox + TG with [Track] / [Skip] buttons.
+
+Cron: Wed 09:00 UTC weekly.
+"""
+import json
+import re
+import sqlite3
+import subprocess
+import urllib.request
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+STATE_DB = Path("/root/.openclaw/agent_state.sqlite")
+
+# Keywords matching Sergei's research portfolio
+KEYWORDS = [
+    "machine learning", "deep learning", "blockchain", "smart contract",
+    "decentralized", "defi", "finance", "quant", "risk", "rag",
+    "retrieval", "agent", "llm", "language model", "anomaly",
+    "vulnerability", "security", "market microstructure", "order book",
+    "high-frequency", "trading", "audit", "verification",
+]
+
+# Hardcoded finance ML conferences — updated quarterly
+HARDCODED = [
+    {
+        "title": "ICAIF (ACM International Conference on AI in Finance)",
+        "deadline": "2026-07-15",
+        "url": "https://ai-finance.org/",
+        "category": "academic-finance",
+    },
+    {
+        "title": "FinNLP (Financial NLP workshop @ EMNLP)",
+        "deadline": "2026-06-30",
+        "url": "https://aclanthology.org/venues/finnlp/",
+        "category": "academic-nlp",
+    },
+    {
+        "title": "ML4QF (ML for Quantitative Finance workshop)",
+        "deadline": "2026-08-20",
+        "url": "https://nips.cc/",
+        "category": "academic-finance",
+    },
+    {
+        "title": "EFA (European Finance Association annual)",
+        "deadline": "2026-07-01",
+        "url": "https://efa-online.org/",
+        "category": "academic-finance",
+    },
+]
+
+
+def _db():
+    conn = sqlite3.connect(STATE_DB)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cfp_seen (
+            cfp_id TEXT PRIMARY KEY,
+            title TEXT,
+            deadline TEXT,
+            url TEXT,
+            first_seen TEXT
+        )
+        """
+    )
+    return conn
+
+
+def fetch_aideadlines():
+    """Pull aideadlin.es YAML from GitHub raw."""
+    try:
+        url = "https://raw.githubusercontent.com/abhshkdz/ai-deadlines/master/src/_data/conferences.yml"
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "sergei-brand-agent cfp-scanner"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            text = r.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"aideadlines fetch failed: {e}")
+        return []
+
+    # Cheap YAML-ish parse — extract title + deadline + link
+    confs = []
+    current = {}
+    for line in text.splitlines():
+        line = line.rstrip()
+        if line.startswith("- title:"):
+            if current.get("title") and current.get("deadline"):
+                confs.append(current)
+            current = {"title": line.split(":", 1)[1].strip().strip('"')}
+        elif line.startswith("  deadline:"):
+            current["deadline"] = line.split(":", 1)[1].strip().strip('"')
+        elif line.startswith("  link:"):
+            current["link"] = line.split(":", 1)[1].strip().strip('"')
+        elif line.startswith("  sub:"):
+            current["sub"] = line.split(":", 1)[1].strip().strip('"')
+    if current.get("title") and current.get("deadline"):
+        confs.append(current)
+    return confs
+
+
+def matches_keywords(text: str) -> bool:
+    if not text:
+        return False
+    t = text.lower()
+    return any(k in t for k in KEYWORDS)
+
+
+def days_until(deadline_str: str) -> int | None:
+    if not deadline_str or deadline_str == "TBD":
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            d = datetime.strptime(deadline_str[:19] if len(deadline_str) > 10
+                                  else deadline_str, fmt)
+            return (d.date() - datetime.utcnow().date()).days
+        except ValueError:
+            continue
+    return None
+
+
+def emit_cfp(conf: dict, days: int) -> None:
+    title = conf.get("title", "?")
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower())[:50].strip("-")
+    body = (
+        f"Title: {title}\n"
+        f"Deadline: {conf.get('deadline', '?')} ({days} days)\n"
+        f"URL: {conf.get('link') or conf.get('url') or '?'}\n"
+        f"Sub: {conf.get('sub') or conf.get('category') or '?'}\n"
+    )
+    severity = "high" if days <= 21 else "medium"
+    subprocess.run(
+        ["/usr/local/bin/emit_event", severity, "cfp_discovered", title[:60], body],
+        check=False,
+    )
+
+
+def main():
+    conn = _db()
+    found = 0
+    candidates = HARDCODED + fetch_aideadlines()
+    for conf in candidates:
+        cfp_id = (conf.get("title", "") + "|" + conf.get("deadline", "")).lower()
+        if conn.execute("SELECT 1 FROM cfp_seen WHERE cfp_id=?", (cfp_id,)).fetchone():
+            continue
+        text_for_match = " ".join([
+            conf.get("title", ""), conf.get("sub", ""), conf.get("category", ""),
+        ])
+        if not matches_keywords(text_for_match):
+            continue
+        days = days_until(conf.get("deadline", ""))
+        if days is None or days < 0 or days > 180:
+            continue
+        emit_cfp(conf, days)
+        conn.execute(
+            "INSERT INTO cfp_seen VALUES (?, ?, ?, ?, ?)",
+            (cfp_id, conf.get("title", ""), conf.get("deadline", ""),
+             conf.get("link") or conf.get("url", ""),
+             datetime.now(timezone.utc).isoformat()),
+        )
+        found += 1
+    conn.commit()
+    conn.close()
+    print(f"cfp_scanner: found_new={found}")
+
+
+if __name__ == "__main__":
+    main()
