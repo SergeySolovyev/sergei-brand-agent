@@ -30,6 +30,7 @@ from googleapiclient.discovery import build
 SECRETS = Path("/opt/brand-agent/secrets")
 CREDS_PATH = SECRETS / "gmail_credentials.json"
 TOKEN_PATH = SECRETS / "gmail_token.json"
+VERIFIER_PATH = SECRETS / "gmail_code_verifier.txt"
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 REDIRECT_URI = "http://localhost:8080/"
@@ -65,6 +66,11 @@ def step_emit_url() -> int:
         prompt="consent",          # force refresh_token issuance
         include_granted_scopes="true",
     )
+    # Persist PKCE code_verifier so step_exchange can replay it.
+    # Without this, Google returns "Missing code verifier" on token exchange.
+    SECRETS.mkdir(parents=True, exist_ok=True)
+    VERIFIER_PATH.write_text(flow.code_verifier or "")
+    os.chmod(VERIFIER_PATH, 0o600)
     print("Open this URL in Chrome (already signed into sssolovjov@gmail.com):\n")
     print(auth_url)
     print(
@@ -93,6 +99,9 @@ def step_exchange(redirect_url: str) -> int:
     flow = Flow.from_client_secrets_file(
         str(CREDS_PATH), scopes=SCOPES, redirect_uri=REDIRECT_URI,
     )
+    # Replay the PKCE verifier from step_emit_url
+    if VERIFIER_PATH.exists():
+        flow.code_verifier = VERIFIER_PATH.read_text().strip()
     flow.fetch_token(code=code)
     creds = flow.credentials
 
