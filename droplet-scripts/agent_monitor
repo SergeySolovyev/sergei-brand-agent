@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Quick monitor: scan OpenAlex + GitHub for new citations/stars vs last snapshot."""
+import json, urllib.request, sqlite3, subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+
+ENV = {}
+for ln in Path("/opt/brand-agent/.env").read_text().splitlines():
+    if "=" in ln and not ln.startswith("#"):
+        k, v = ln.split("=", 1)
+        ENV[k.strip()] = v.strip()
+
+STATE = Path("/root/.openclaw/agent_state.sqlite")
+STATE.parent.mkdir(parents=True, exist_ok=True)
+db = sqlite3.connect(STATE)
+db.execute("CREATE TABLE IF NOT EXISTS snapshots (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+
+
+def get_snap(k):
+    row = db.execute("SELECT value FROM snapshots WHERE key=?", (k,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def set_snap(k, v):
+    db.execute(
+        "INSERT OR REPLACE INTO snapshots VALUES (?, ?, ?)",
+        (k, json.dumps(v), datetime.now(timezone.utc).isoformat()),
+    )
+    db.commit()
+
+
+def emit(sev, kind, title, body):
+    subprocess.run(["/usr/local/bin/emit_event", sev, kind, title, body], check=False)
+
+
+def http_json(url, headers=None):
+    req = urllib.request.Request(
+        url, headers=headers or {"User-Agent": "sergei-brand-agent monitor"}
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read())
+
+
+# OpenAlex — citations per work
+try:
+    data = http_json(
+        "https://api.openalex.org/works?filter=author.id:A5127404993"
+        "&per-page=50&select=id,doi,title,cited_by_count"
+    )
+    works = data.get("results", [])
+    prev = get_snap("openalex_citations")
+    cur = {w["id"]: w["cited_by_count"] for w in works}
+    for wid, count in cur.items():
+        delta = count - prev.get(wid, 0)
+        if delta > 0:
+            title = next(
+                (w["title"] for w in works if w["id"] == wid), wid
+            )[:80]
+            doi = next((w.get("doi", "") for w in works if w["id"] == wid), "")
+            sev = "critical" if delta >= 3 else "high"
+            emit(
+                sev,
+                "openalex_citation",
+                f"+{delta} citation(s) — {title}",
+                f"OpenAlex work {wid}\n"
+                f"cited_by_count: {prev.get(wid, 0)} -> {count} (delta +{delta})\n"
+                f"DOI: {doi}",
+            )
+    set_snap("openalex_citations", cur)
+except Exception as e:
+    print(f"openalex error: {e}")
+
+# GitHub — stars on owned repos
+try:
+    gh_token = ENV.get("GITHUB_TOKEN", "")
+    headers = {"Accept": "application/vnd.github+json"}
+    if gh_token:
+        headers["Authorization"] = f"Bearer {gh_token}"
+    repos = http_json(
+        "https://api.github.com/users/SergeySolovyev/repos?type=owner&sort=updated&per_page=30",
+        headers,
+    )
+    prev = get_snap("github_stars")
+    cur = {r["name"]: r["stargazers_count"] for r in repos if not r.get("fork")}
+    for repo, stars in cur.items():
+        delta = stars - prev.get(repo, 0)
+        if delta > 0:
+            sev = "high" if stars >= 5 else "medium"
+            emit(
+                sev,
+                "github_star",
+                f"+{delta} star on {repo} ({stars} total)",
+                f"Repo: github.com/SergeySolovyev/{repo}\n"
+                f"Prev: {prev.get(repo, 0)} -> Now: {stars} (delta +{delta})",
+            )
+    set_snap("github_stars", cur)
+except Exception as e:
+    print(f"github error: {e}")
+
+print(f"monitor pass complete at {datetime.now(timezone.utc).isoformat()}")

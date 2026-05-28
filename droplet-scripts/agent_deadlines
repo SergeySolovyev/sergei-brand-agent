@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Deadline tracker: emit critical alerts when known deadlines approach.
+
+Runs daily at 09:00 UTC. Reads /opt/brand-agent/knowledge_base/deadlines.json
+(or built-in defaults) and emits severity based on days remaining:
+  > 14 days  → low (rolled into daily digest only)
+  7-14 days  → medium (digest only)
+  3-7 days   → high (Telegram push + git)
+  < 3 days   → critical (push + retry until /ack)
+
+Idempotent — same deadline only emits once per severity transition (tracked
+in agent_state.sqlite).
+"""
+import json, sqlite3, subprocess
+from pathlib import Path
+from datetime import datetime, timezone, date
+
+# Sergei's actual deadlines — hardcoded as ground truth for now.
+# If knowledge_base/deadlines.json exists, override from there.
+DEFAULT_DEADLINES = [
+    {
+        "id": "mipt_blockchain_master_2026",
+        "title": "МФТИ Blockchain Master's — documents deadline",
+        "deadline": "2026-07-31",
+        "category": "education",
+        "actions_needed": [
+            "Submit 3 RINC publication references",
+            "Finalize CV (Solovev_Sergei_CV_RU.pdf)",
+            "Research proposal review",
+            "Letters of recommendation",
+        ],
+        "link": "https://pk.mipt.ru/master/2026_ID/",
+    },
+    {
+        "id": "airi_summer_school_2026",
+        "title": "AIRI 2026 Summer School — submission",
+        "deadline": "2026-06-15",
+        "category": "education",
+        "actions_needed": [
+            "Submit FinAgent report",
+            "Video script + recording",
+            "Research proposal PDF",
+        ],
+        "link": "https://airi.net/ru/summer-school-2026/",
+    },
+    {
+        "id": "molodoy_uchenyy_22",
+        "title": "Молодой учёный №22 — payment + final docs",
+        "deadline": "2026-06-06",
+        "category": "publication",
+        "actions_needed": [
+            "Pay 3 600 ₽",
+            "Submit final .docx through ЛК",
+        ],
+        "link": "https://moluch.ru/",
+    },
+    {
+        "id": "internauka_20",
+        "title": "Интернаука №20 — submission",
+        "deadline": "2026-06-02",
+        "category": "publication",
+        "actions_needed": [
+            "Complete submission form",
+            "Email .docx",
+            "Pay ~2 450 ₽",
+        ],
+        "link": "https://internauka.org/",
+    },
+    {
+        "id": "universum_6_147",
+        "title": "Universum 6(147) — payment confirmation",
+        "deadline": "2026-06-14",
+        "category": "publication",
+        "actions_needed": [
+            "Confirm payment 3 818 ₽",
+        ],
+        "link": "https://7universum.com/",
+    },
+]
+
+
+def severity_from_days(days):
+    if days < 3:
+        return "critical"
+    if days <= 7:
+        return "high"
+    if days <= 14:
+        return "medium"
+    return "low"
+
+
+def main():
+    state_db = Path("/root/.openclaw/agent_state.sqlite")
+    db = sqlite3.connect(state_db)
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS deadline_emit_log "
+        "(deadline_id TEXT, severity TEXT, emitted_at TEXT, PRIMARY KEY (deadline_id, severity))"
+    )
+
+    # Allow user override
+    user_file = Path("/opt/brand-agent/knowledge_base/deadlines.json")
+    deadlines = DEFAULT_DEADLINES
+    if user_file.exists():
+        try:
+            deadlines = json.loads(user_file.read_text())
+        except Exception:
+            pass
+
+    today = date.today()
+    for d in deadlines:
+        try:
+            dl_date = date.fromisoformat(d["deadline"])
+        except Exception:
+            continue
+        days = (dl_date - today).days
+        if days < 0:
+            continue  # past
+
+        sev = severity_from_days(days)
+        already_emitted = db.execute(
+            "SELECT 1 FROM deadline_emit_log WHERE deadline_id=? AND severity=?",
+            (d["id"], sev),
+        ).fetchone()
+        if already_emitted and sev not in ("critical",):
+            # critical re-emit every day until acknowledged or past
+            continue
+
+        actions_md = "\n".join(f"- {a}" for a in d.get("actions_needed", []))
+        body = (
+            f"**{d['title']}**\n\n"
+            f"Deadline: {d['deadline']} ({days} day{'s' if days != 1 else ''} away)\n"
+            f"Category: {d.get('category', '?')}\n"
+            f"Link: {d.get('link', '')}\n\n"
+            f"**Actions still needed:**\n{actions_md}\n"
+        )
+        subprocess.run(
+            [
+                "/usr/local/bin/emit_event",
+                sev,
+                "deadline_approaching",
+                f"{d['title']} — {days}d",
+                body,
+            ],
+            check=False,
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO deadline_emit_log VALUES (?, ?, ?)",
+            (d["id"], sev, datetime.now(timezone.utc).isoformat()),
+        )
+        db.commit()
+
+    print(f"deadlines tick complete at {datetime.now(timezone.utc).isoformat()}")
+
+
+if __name__ == "__main__":
+    main()

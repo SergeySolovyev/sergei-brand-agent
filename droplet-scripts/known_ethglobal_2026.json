@@ -1,0 +1,69 @@
+{
+  "_meta": {
+    "source": "ETHGlobal X announcement 2025-11 + manual curation",
+    "last_updated": "2026-05-28",
+    "note": "ETHGlobal has no public API. Calendar refreshed by hand quarterly."
+  },
+  "events": [
+    {
+      "name": "ETHGlobal Cannes",
+      "url": "https://ethglobal.com/events/cannes2026",
+      "start_date": "2026-04-03",
+      "end_date": "2026-04-05",
+      "format": "in-person",
+      "location": "Cannes, France",
+      "status": "past",
+      "tracks": ["DeFi", "infrastructure", "L2", "ZK"]
+    },
+    {
+      "name": "ETHGlobal New York",
+      "url": "https://ethglobal.com/events/newyork2026",
+      "start_date": "2026-06-12",
+      "end_date": "2026-06-14",
+      "format": "in-person",
+      "location": "New York, USA",
+      "status": "upcoming",
+      "tracks": ["DeFi", "AI agents", "ZK", "infrastructure"]
+    },
+    {
+      "name": "ETHGlobal Lisbon",
+      "url": "https://ethglobal.com/events/lisbon2026",
+      "start_date": "2026-07-24",
+      "end_date": "2026-07-26",
+      "format": "in-person",
+      "location": "Lisbon, Portugal",
+      "status": "upcoming",
+      "tracks": ["DeFi", "consumer crypto", "L2"]
+    },
+    {
+      "name": "ETHGlobal Tokyo",
+      "url": "https://ethglobal.com/events/tokyo2026",
+      "start_date": "2026-09-25",
+      "end_date": "2026-09-27",
+      "format": "in-person",
+      "location": "Tokyo, Japan",
+      "status": "upcoming",
+      "tracks": ["DeFi", "Asia ecosystem", "L2"]
+    },
+    {
+      "name": "ETHGlobal Mumbai",
+      "url": "https://ethglobal.com/events/mumbai2026",
+      "start_date": "2026-11-15",
+      "end_date": "2026-11-17",
+      "format": "in-person",
+      "location": "Mumbai, India",
+      "status": "upcoming",
+      "tracks": ["DeFi", "remittance", "infrastructure"]
+    },
+    {
+      "name": "ETHOnline",
+      "url": "https://ethglobal.com/events/ethonline2026",
+      "start_date": "2026-09-01",
+      "end_date": "2026-09-22",
+      "format": "online",
+      "location": "Worldwide",
+      "status": "upcoming",
+      "tracks": ["DeFi", "AI", "ZK", "tooling"]
+    }
+  ]
+}

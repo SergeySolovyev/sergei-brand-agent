@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Weekly discovery: scan grants/CFP/hackathons aligned with Sergei's portfolio."""
+import json, re, urllib.request, sqlite3, subprocess
+from pathlib import Path
+from datetime import datetime, timezone
+
+STATE = Path("/root/.openclaw/agent_state.sqlite")
+db = sqlite3.connect(STATE)
+db.execute(
+    "CREATE TABLE IF NOT EXISTS discoveries "
+    "(url TEXT PRIMARY KEY, kind TEXT, title TEXT, first_seen TEXT)"
+)
+
+
+def emit(sev, kind, title, body):
+    subprocess.run(
+        ["/usr/local/bin/emit_event", sev, kind, title, body], check=False
+    )
+
+
+def already(url):
+    return db.execute("SELECT 1 FROM discoveries WHERE url=?", (url,)).fetchone() is not None
+
+
+def remember(url, kind, title):
+    db.execute(
+        "INSERT OR REPLACE INTO discoveries VALUES (?, ?, ?, ?)",
+        (url, kind, title, datetime.now(timezone.utc).isoformat()),
+    )
+    db.commit()
+
+
+KEYWORDS = [
+    "smart contract",
+    "DeFi",
+    "blockchain",
+    "Solidity",
+    "RAG",
+    "vulnerability detection",
+    "AI agent",
+    "MEV",
+    "ZK",
+    "ERC-4626",
+    "retrieval",
+]
+
+
+def fetch_json(url, headers=None):
+    req = urllib.request.Request(
+        url, headers=headers or {"User-Agent": "sergei-brand-agent discovery"}
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read())
+
+
+def fetch_text(url, headers=None):
+    req = urllib.request.Request(
+        url, headers=headers or {"User-Agent": "sergei-brand-agent discovery"}
+    )
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read().decode("utf-8", errors="ignore")
+
+
+found_total = 0
+
+# ETHGlobal upcoming — live API first, hardcoded fallback when 404/blocked.
+# Their public API has been unstable; the JSON file is manually refreshed
+# quarterly from the X announcement thread.
+ethglobal_events = []
+try:
+    ethglobal_events = fetch_json(
+        "https://ethglobal.com/api/v1/events?status=upcoming"
+    ).get("data", [])
+    print(f"ethglobal: live API returned {len(ethglobal_events)} events")
+except Exception as e:
+    print(f"ethglobal live API failed ({e}); loading fallback")
+    fallback = Path("/opt/brand-agent/knowledge_base/known_ethglobal_2026.json")
+    if fallback.exists():
+        try:
+            data = json.loads(fallback.read_text())
+            # Normalize fallback schema to match live-API field names.
+            today = datetime.now(timezone.utc).date().isoformat()
+            for ev in data.get("events", []):
+                if ev.get("status") == "past" or ev.get("end_date", "") < today:
+                    continue
+                ethglobal_events.append({
+                    "name": ev.get("name", ""),
+                    "url": ev.get("url", ""),
+                    "startDate": ev.get("start_date", ""),
+                    "tracks": ev.get("tracks", []),
+                    "prizePoolUSD": "unknown (fallback)",
+                })
+            print(f"ethglobal: fallback returned {len(ethglobal_events)} events")
+        except Exception as e2:
+            print(f"ethglobal fallback parse error: {e2}")
+
+for ev in ethglobal_events:
+    url = ev.get("url")
+    if not url or already(url):
+        continue
+    haystack = (
+        ev.get("name", "") + " " + " ".join(ev.get("tracks", []) or [])
+    ).lower()
+    matched = [k for k in KEYWORDS if k.lower() in haystack]
+    if not matched:
+        continue
+    remember(url, "hackathon", ev.get("name", ""))
+    emit(
+        "high",
+        "hackathon_discovered",
+        f"ETHGlobal: {ev.get('name', '')}",
+        f"URL: {url}\n"
+        f"Starts: {ev.get('startDate', '')}\n"
+        f"Tracks: {ev.get('tracks', [])}\n"
+        f"Matched keywords: {matched}\n"
+        f"Prize pool: {ev.get('prizePoolUSD', 'unknown')}",
+    )
+    found_total += 1
+
+# DoraHacks ongoing
+try:
+    data = fetch_json(
+        "https://dorahacks.io/api/hackathon/list?status=ongoing&page=1&page_size=30"
+    ).get("results", []) or []
+    for ev in data[:20]:
+        url = ev.get("url") or f"https://dorahacks.io/hackathon/{ev.get('id', '')}"
+        if already(url):
+            continue
+        haystack = (
+            ev.get("name", "") + " " + " ".join(ev.get("tracks", []) or [])
+        ).lower()
+        matched = [k for k in KEYWORDS if k.lower() in haystack]
+        if not matched:
+            continue
+        remember(url, "hackathon", ev.get("name", ""))
+        emit(
+            "medium",
+            "hackathon_discovered",
+            f"DoraHacks: {ev.get('name', '')}",
+            f"URL: {url}\n"
+            f"Tracks: {ev.get('tracks', [])}\n"
+            f"Matched: {matched}",
+        )
+        found_total += 1
+except Exception as e:
+    print(f"dorahacks error: {e}")
+
+# Ethereum Foundation Academic Grants (blog Atom feed)
+try:
+    body = fetch_text("https://blog.ethereum.org/feed.xml")
+    items = re.findall(
+        r"<entry>.*?<title[^>]*>([^<]+)</title>.*?<link[^>]+href=\"([^\"]+)\".*?</entry>",
+        body,
+        re.DOTALL,
+    )
+    for title, url in items[:30]:
+        title_l = title.lower()
+        if already(url):
+            continue
+        if any(k in title_l for k in ("grant", "academic", "research", "funding", "rfp")):
+            remember(url, "grant", title)
+            emit(
+                "high",
+                "grant_discovered",
+                f"ETH Foundation: {title}",
+                f"URL: {url}\nTitle: {title}",
+            )
+            found_total += 1
+except Exception as e:
+    print(f"ef_blog error: {e}")
+
+# Encode Club events
+try:
+    body = fetch_text("https://www.encode.club/events")
+    # Crude regex — Encode renders client-side, but their meta still embeds event names
+    for m in re.finditer(r'"name":"([^"]{8,90})"[^}]*"url":"(https?://[^"]+)"', body):
+        title, url = m.group(1), m.group(2)
+        if already(url):
+            continue
+        matched = [k for k in KEYWORDS if k.lower() in title.lower()]
+        if not matched:
+            continue
+        remember(url, "event", title)
+        emit(
+            "medium",
+            "event_discovered",
+            f"Encode Club: {title}",
+            f"URL: {url}\nMatched: {matched}",
+        )
+        found_total += 1
+except Exception as e:
+    print(f"encode error: {e}")
+
+if found_total == 0:
+    subprocess.run(
+        [
+            "/usr/local/bin/emit_event",
+            "low",
+            "discovery_quiet",
+            "no new opportunities this week",
+            "Scanned ETHGlobal + DoraHacks + EF blog + Encode Club. "
+            "Nothing new matched portfolio keywords.",
+        ],
+        check=False,
+    )
+
+print(
+    f"discover pass complete at {datetime.now(timezone.utc).isoformat()}, found_new={found_total}"
+)

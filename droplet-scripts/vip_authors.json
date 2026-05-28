@@ -1,0 +1,68 @@
+{
+  "_meta": {
+    "purpose": "Auto-escalate mention to CRITICAL severity if author matches this list.",
+    "curated_for": "Sergei Solovev — DeFi security, AI, RAG, MCDM, smart contracts",
+    "last_updated": "2026-05-28",
+    "instructions": "Add handles in the form: { handle: 'lowercase_handle', platform: 'x|linkedin|github', why: 'one-line reason' }"
+  },
+  "tier_S_critical": [
+    {"handle": "vitalikbuterin", "platform": "x", "why": "Ethereum founder, 5M+ followers — any mention is escalation"},
+    {"handle": "lefterisjp", "platform": "x", "why": "Aave founder Stani's deputy, smart-contract policy thinker"},
+    {"handle": "haydenzadams", "platform": "x", "why": "Uniswap founder, DeFi protocol design influencer"},
+    {"handle": "samczsun", "platform": "x", "why": "Paradigm security researcher, audit thought leader"},
+    {"handle": "trail_of_bits", "platform": "x", "why": "ToB — leading smart-contract audit firm, ML+security overlap"},
+    {"handle": "certikofficial", "platform": "x", "why": "Major audit firm, competitive intelligence + potential partner"},
+    {"handle": "openzeppelin", "platform": "x", "why": "Solidity tooling, library author"},
+    {"handle": "ethereumfndn", "platform": "x", "why": "EF Academic Grants official channel"},
+    {"handle": "anthropicai", "platform": "x", "why": "Claude/AI safety, RAG-eval thought leader"},
+    {"handle": "hwchase17", "platform": "x", "why": "LangChain founder, RAG/agents ecosystem"},
+    {"handle": "yann_lecun_org", "platform": "x", "why": "Meta AI / academic ML audience"}
+  ],
+  "tier_A_high": [
+    {"handle": "preethikasireddy", "platform": "x", "why": "Web3 thought leader, dev evangelist"},
+    {"handle": "owocki", "platform": "x", "why": "Gitcoin co-founder, public goods + grants"},
+    {"handle": "ricburton", "platform": "x", "why": "Balancer founder, AMM design"},
+    {"handle": "rleshner", "platform": "x", "why": "Compound founder"},
+    {"handle": "lex_node", "platform": "x", "why": "DeFi legal / DAO governance thought leader"},
+    {"handle": "0xMaki", "platform": "x", "why": "Sushi/Yearn ecosystem"},
+    {"handle": "joshjnoble", "platform": "x", "why": "Coinbase Ventures, DeFi investor"},
+    {"handle": "0xfoobar", "platform": "x", "why": "Onchain analyst, security-conscious"},
+    {"handle": "molly0xfff", "platform": "x", "why": "Web3 critical researcher, crypto news"},
+    {"handle": "ericwj", "platform": "x", "why": "Smart contract auditor at OpenZeppelin"},
+    {"handle": "kelvinfichter", "platform": "x", "why": "Optimism / L2 thought leader"},
+    {"handle": "tarunchitra", "platform": "x", "why": "Gauntlet founder, DeFi mechanism design"},
+    {"handle": "elinakitiyev", "linkedin", "why": "AIRI representative / faculty (TBD verify)"}
+  ],
+  "tier_B_medium_for_engagement": [
+    {"handle": "encodeclub", "platform": "x", "why": "Web3 education, hackathon network"},
+    {"handle": "devpost", "platform": "x", "why": "Hackathon platform"},
+    {"handle": "ethglobal", "platform": "x", "why": "Hackathon organizer"},
+    {"handle": "dorahacksglobal", "platform": "x", "why": "Hackathon platform"},
+    {"handle": "0xPolygonDevs", "platform": "x", "why": "Polygon ecosystem"},
+    {"handle": "arbitrum", "platform": "x", "why": "L2 ecosystem"},
+    {"handle": "optimism", "platform": "x", "why": "L2 ecosystem"},
+    {"handle": "ZachXBT", "platform": "x", "why": "Onchain investigator, exploit researcher"},
+    {"handle": "PeckShield", "platform": "x", "why": "Asia audit firm, hack alerts"}
+  ],
+  "russian_ecosystem_critical": [
+    {"handle": "skoltech_research", "platform": "x", "why": "Skoltech — partner for МФТИ + research grants"},
+    {"handle": "RSCF_press", "platform": "x", "why": "Russian Science Foundation (РНФ) — primary grant source"},
+    {"handle": "AIRI_inst", "platform": "x", "why": "AIRI — applied for Summer School 2026"},
+    {"handle": "MIPT_HSE", "platform": "x", "why": "HSE FCS — Sergei's home institution"}
+  ],
+  "domain_terms_critical": {
+    "auto_critical_if_text_contains_any": [
+      "Solovev",
+      "Sergei Solovev",
+      "Сергей Соловьев",
+      "sergeisolovev.com",
+      "ai-yield-vault",
+      "honest-rag-solidity",
+      "10.6084/m9.figshare.32141182",
+      "10.6084/m9.figshare.32141167",
+      "10.6084/m9.figshare.31859557",
+      "10.6084/m9.figshare.31429971",
+      "10.6084/m9.figshare.31430086"
+    ]
+  }
+}

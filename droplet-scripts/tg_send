@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+'''Send a message to Sergei's Telegram via the brand-agent bot.
+
+Usage: tg_send <text> | tg_send --file <path>
+
+Tries Markdown first; on parse error falls back to plain text. This protects
+against random underscores, asterisks, etc. in event bodies that would
+otherwise drop notifications silently.
+'''
+import os, sys, json, urllib.request
+from pathlib import Path
+
+env_file = Path('/opt/brand-agent/.env')
+env = {}
+for line in env_file.read_text().splitlines():
+    if '=' in line and not line.startswith('#'):
+        k, v = line.split('=', 1)
+        env[k.strip()] = v.strip()
+
+token = env.get('TELEGRAM_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN')
+chat_id = env.get('TELEGRAM_HOME_CHANNEL') or os.environ.get('TELEGRAM_HOME_CHANNEL')
+
+if len(sys.argv) > 2 and sys.argv[1] == '--file':
+    text = Path(sys.argv[2]).read_text(encoding='utf-8')
+else:
+    text = ' '.join(sys.argv[1:]) or sys.stdin.read()
+
+
+def send(text, parse_mode):
+    body = {'chat_id': int(chat_id), 'text': text}
+    if parse_mode:
+        body['parse_mode'] = parse_mode
+    payload = json.dumps(body).encode('utf-8')
+    req = urllib.request.Request(
+        f'https://api.telegram.org/bot{token}/sendMessage',
+        data=payload,
+        headers={'Content-Type': 'application/json; charset=utf-8'},
+        method='POST',
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
+
+# Try Markdown first; fall back to plain text on 400.
+try:
+    resp = send(text, 'Markdown')
+    print(f"sent: msg_id={resp['result']['message_id']} mode=Markdown")
+except urllib.error.HTTPError as e:
+    if e.code == 400:
+        try:
+            resp = send(text, None)
+            print(
+                f"sent: msg_id={resp['result']['message_id']} "
+                f"mode=plain (markdown rejected)"
+            )
+        except Exception as e2:
+            print(f'FAIL plain-text: {e2}')
+            sys.exit(1)
+    else:
+        print(f'FAIL: {e}')
+        sys.exit(1)
+except Exception as e:
+    print(f'FAIL: {e}')
+    sys.exit(1)
