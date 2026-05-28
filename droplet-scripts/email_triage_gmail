@@ -57,6 +57,36 @@ def _mark_seen(conn, message_id: str) -> None:
     )
 
 
+def _is_marketing(headers: dict, sender: str, subject: str) -> bool:
+    """Quick deterministic marketing-email detector — runs BEFORE LLM triage.
+
+    Catches ~80% of newsletters and promo blasts without burning LLM tokens.
+    Signals:
+      - List-Unsubscribe / List-Unsubscribe-Post header present → mass-mail
+      - Precedence: bulk | list
+      - Sender contains: noreply, no-reply, do-not-reply, mailer, news, marketing
+      - Common bulk-mail subjects (sale, off, % off, free trial, webinar reminder)
+    """
+    # List-Unsubscribe is the strongest signal — required for legit mass mail
+    if any(h.lower() in headers for h in ("List-Unsubscribe", "List-Id")):
+        return True
+    if headers.get("Precedence", "").lower() in ("bulk", "list", "junk"):
+        return True
+    sl = (sender or "").lower()
+    for pat in ("noreply@", "no-reply@", "donotreply@", "do-not-reply@",
+                "newsletter@", "marketing@", "news@", "mailer@", "@e.",
+                "@mail.", "@email.", "@notifications.", "@bounce."):
+        if pat in sl:
+            return True
+    subj_l = (subject or "").lower()
+    for pat in ("% off", "% скидка", "flash sale", "limited time",
+                "webinar", "вебинар", "free trial", "unsubscribe",
+                "newsletter", "promotion"):
+        if pat in subj_l:
+            return True
+    return False
+
+
 def _extract_body(payload) -> str:
     """Walk MIME tree, return first text/plain body decoded, truncated to 2KB."""
     def _walk(part):
@@ -132,6 +162,18 @@ def main() -> int:
             subject = headers.get("Subject", "(no subject)")
             sender = headers.get("From", "(unknown)")
             body = _extract_body(msg["payload"])
+
+            # Anti-marketing pre-filter — saves an LLM call and prevents
+            # promo emails from getting "engage" via keyword overlap.
+            # Domain-critical terms still escalate even on marketing senders
+            # (e.g. a press release mentioning sergeisolovev.com).
+            if _is_marketing(headers, sender, subject):
+                import triage as _t
+                if not _t._contains_domain_term(f"{subject}\n{body}",
+                                                _t._load_vip()):
+                    _mark_seen(conn, mid)
+                    new_count += 1
+                    continue
 
             decision = triage.triage(sender, subject, body)
             new_count += 1

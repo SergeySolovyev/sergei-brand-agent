@@ -63,6 +63,13 @@ def keyboard_for(kind: str, slug: str) -> dict | None:
     elif kind in ('mention', 'inbound_mention'):
         rows = [[btn('💬 Reply', 'r'), btn('🚫 Mute author', 'm'),
                  btn('⏭ Skip', 's')]]
+    elif kind == 'draft_reply':
+        # slug here is actually the numeric draft_id
+        rows = [
+            [{'text': '✅ Send', 'callback_data': f'sd:{slug}'[:64]},
+             {'text': '✏️ Edit', 'callback_data': f'ed:{slug}'[:64]},
+             {'text': '❌ Discard', 'callback_data': f'dd:{slug}'[:64]}],
+        ]
     elif kind == 'menu':
         # /menu command — global commands as buttons
         rows = [

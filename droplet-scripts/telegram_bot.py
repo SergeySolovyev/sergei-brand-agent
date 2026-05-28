@@ -330,9 +330,12 @@ ACTION_LABEL = {
     'a': '✅ Acked — retry stopped',
     'z': '⏰ Snoozed — will re-notify after delay',
     't': '📝 Compose post queued',
-    'r': '💬 Reply draft queued',
+    'r': '💬 Drafting reply — preview incoming',
     'm': '🚫 Author muted',
     'v': '👁 Seen',
+    'sd': '✅ Sending email…',
+    'ed': '✏️ Edit requested — reply with new text',
+    'dd': '❌ Draft discarded',
 }
 
 
@@ -437,6 +440,49 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (slug, datetime.now(timezone.utc).isoformat(),
                      json.dumps({'trigger': 'button_thank', 'user': user})),
                 )
+        except Exception:
+            pass
+        return
+    if code == 'r':
+        # Reply → spawn draft_reply.py (fire-and-forget). It composes the
+        # reply via claude-cli and sends a preview back with [✅][✏️][❌].
+        import subprocess as _sp
+        _sp.Popen(
+            ['/opt/brand-agent/venv/bin/python',
+             '/opt/brand-agent/draft_reply.py', slug],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+        return
+    if code == 'sd':
+        # Send draft → invoke send_reply.py with draft_id
+        import subprocess as _sp
+        _sp.Popen(
+            ['/opt/brand-agent/venv/bin/python',
+             '/opt/brand-agent/send_reply.py', slug],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+        return
+    if code == 'dd':
+        # Discard draft
+        try:
+            with sqlite3.connect(AGENT_STATE_DB) as conn:
+                conn.execute(
+                    "UPDATE drafts SET status = 'discarded', decided_at = ? "
+                    "WHERE draft_id = ?",
+                    (datetime.now(timezone.utc).isoformat(), int(slug)),
+                )
+        except Exception:
+            pass
+        return
+    if code == 'ed':
+        # Edit → tell user to reply with new text (manual edit flow Phase 2)
+        try:
+            await query.message.reply_text(
+                f"✏️ To edit draft #{slug}, reply with new text. "
+                "(Edit flow not fully wired yet — for now click ❌ Discard "
+                "and re-trigger Reply, or just respond to the original "
+                "email manually in Gmail.)"
+            )
         except Exception:
             pass
         return
