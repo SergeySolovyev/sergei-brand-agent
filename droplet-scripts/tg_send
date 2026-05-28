@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
-'''Send a message to Sergei's Telegram via the brand-agent bot.
+"""Send a message to Sergei's Telegram via the brand-agent bot.
 
-Usage: tg_send <text> | tg_send --file <path>
+Usage:
+  tg_send <text>
+  tg_send --file <path>
+  tg_send --kind <event_kind> --slug <slug> <text>
 
-Tries Markdown first; on parse error falls back to plain text. This protects
-against random underscores, asterisks, etc. in event bodies that would
-otherwise drop notifications silently.
-'''
-import os, sys, json, urllib.request
+When --kind and --slug are passed, an inline keyboard is attached so Sergei can
+respond by tapping a button instead of typing /commands. Keyboards are
+context-aware per event kind.
+
+Always tries Markdown first; on parse error falls back to plain text so messages
+containing raw URLs with underscores still deliver.
+"""
+import os
+import sys
+import json
+import argparse
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 env_file = Path('/opt/brand-agent/.env')
@@ -20,16 +31,60 @@ for line in env_file.read_text().splitlines():
 token = env.get('TELEGRAM_BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN')
 chat_id = env.get('TELEGRAM_HOME_CHANNEL') or os.environ.get('TELEGRAM_HOME_CHANNEL')
 
-if len(sys.argv) > 2 and sys.argv[1] == '--file':
-    text = Path(sys.argv[2]).read_text(encoding='utf-8')
-else:
-    text = ' '.join(sys.argv[1:]) or sys.stdin.read()
+
+# ---------------------------------------------------------------------------
+# Keyboard catalogue — one set per event kind.
+# Telegram callback_data ≤ 64 bytes, so we use 1-2 letter action codes.
+# Codes decoded in telegram_bot.py:
+#   i = interested    s = skip       a = ack
+#   z = snooze        t = thank      r = reply
+#   m = mute          v = seen
+# ---------------------------------------------------------------------------
+def keyboard_for(kind: str, slug: str) -> dict | None:
+    if not slug:
+        return None
+
+    def btn(text, code):
+        return {'text': text, 'callback_data': f'{code}:{slug}'[:64]}
+
+    def btn_param(text, code, param):
+        return {'text': text, 'callback_data': f'{code}:{slug}:{param}'[:64]}
+
+    if kind in ('hackathon_discovered', 'grant_discovered', 'event_discovered',
+                'cfp_discovered'):
+        rows = [[btn('👍 Interested', 'i'), btn('⏭ Skip', 's')]]
+    elif kind == 'deadline_approaching':
+        rows = [
+            [btn('✅ Ack', 'a'), btn_param('⏰ +1d', 'z', '1'),
+             btn_param('⏰ +3d', 'z', '3')]
+        ]
+    elif kind in ('openalex_citation', 'github_star'):
+        rows = [[btn('📝 Compose post', 't'), btn('⏭ Skip', 's')]]
+    elif kind in ('mention', 'inbound_mention'):
+        rows = [[btn('💬 Reply', 'r'), btn('🚫 Mute author', 'm'),
+                 btn('⏭ Skip', 's')]]
+    elif kind == 'menu':
+        # /menu command — global commands as buttons
+        rows = [
+            [{'text': '📊 Status', 'callback_data': 'mn:status'},
+             {'text': '⏸ Pause', 'callback_data': 'mn:pause'},
+             {'text': '▶️ Resume', 'callback_data': 'mn:resume'}],
+            [{'text': '🔄 Pulse', 'callback_data': 'mn:pulse'},
+             {'text': '📰 Digest', 'callback_data': 'mn:digest'}],
+        ]
+    else:
+        # Generic fallback for unknown kinds
+        rows = [[btn('👁 Seen', 'v'), btn('⏭ Skip', 's')]]
+
+    return {'inline_keyboard': rows}
 
 
-def send(text, parse_mode):
+def send(text, parse_mode, reply_markup=None):
     body = {'chat_id': int(chat_id), 'text': text}
     if parse_mode:
         body['parse_mode'] = parse_mode
+    if reply_markup:
+        body['reply_markup'] = reply_markup
     payload = json.dumps(body).encode('utf-8')
     req = urllib.request.Request(
         f'https://api.telegram.org/bot{token}/sendMessage',
@@ -41,24 +96,44 @@ def send(text, parse_mode):
         return json.loads(r.read())
 
 
-# Try Markdown first; fall back to plain text on 400.
-try:
-    resp = send(text, 'Markdown')
-    print(f"sent: msg_id={resp['result']['message_id']} mode=Markdown")
-except urllib.error.HTTPError as e:
-    if e.code == 400:
-        try:
-            resp = send(text, None)
-            print(
-                f"sent: msg_id={resp['result']['message_id']} "
-                f"mode=plain (markdown rejected)"
-            )
-        except Exception as e2:
-            print(f'FAIL plain-text: {e2}')
-            sys.exit(1)
+def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--file')
+    parser.add_argument('--kind')
+    parser.add_argument('--slug')
+    parser.add_argument('text', nargs='*')
+    args = parser.parse_args()
+
+    if args.file:
+        text = Path(args.file).read_text(encoding='utf-8')
+    elif args.text:
+        text = ' '.join(args.text)
     else:
+        text = sys.stdin.read()
+
+    reply_markup = keyboard_for(args.kind or '', args.slug or '')
+
+    try:
+        resp = send(text, 'Markdown', reply_markup)
+        print(f"sent: msg_id={resp['result']['message_id']} mode=Markdown")
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            try:
+                resp = send(text, None, reply_markup)
+                print(
+                    f"sent: msg_id={resp['result']['message_id']} "
+                    f"mode=plain (markdown rejected)"
+                )
+            except Exception as e2:
+                print(f'FAIL plain-text: {e2}')
+                sys.exit(1)
+        else:
+            print(f'FAIL: {e}')
+            sys.exit(1)
+    except Exception as e:
         print(f'FAIL: {e}')
         sys.exit(1)
-except Exception as e:
-    print(f'FAIL: {e}')
-    sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

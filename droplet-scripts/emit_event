@@ -1,0 +1,77 @@
+#!/bin/bash
+# Universal dual-channel event emitter.
+# Usage: emit_event <severity> <kind> <title> <body_or_file>
+#   severity: low | medium | high | critical
+#   kind: snake_case identifier (e.g. citation_discovered)
+#   title: short headline
+#   body_or_file: markdown body string, or path to .md file
+#
+# Auto-routes per /opt/reports/severity_routing.yaml.
+# Always git-commit-first, then Telegram push for high/critical.
+# Telegram push includes inline keyboard tied to <kind>+<slug>.
+
+set -euo pipefail
+
+SEVERITY=${1:?usage: emit_event <severity> <kind> <title> <body>}
+KIND=${2:?usage: emit_event <severity> <kind> <title> <body>}
+TITLE=${3:?usage: emit_event <severity> <kind> <title> <body>}
+BODY_INPUT=${4:?usage: emit_event <severity> <kind> <title> <body>}
+
+# Load env
+source /opt/brand-agent/.env
+
+UNIX=$(date +%s)
+ISO=$(date -u -Iseconds)
+DATE=$(date -u +%Y-%m-%d)
+MONTH=$(date -u +%Y-%m)
+SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g' | sed 's/^-\|-$//g' | cut -c1-50)
+BODY=$([ -f "$BODY_INPUT" ] && cat "$BODY_INPUT" || echo "$BODY_INPUT")
+
+cd /opt/reports
+git pull --quiet origin main 2>/dev/null || true
+
+# Step 1: durable git commit
+if [[ "$SEVERITY" == "high" || "$SEVERITY" == "critical" ]]; then
+  FILEPATH="reports/inbox/${UNIX}_${KIND}_${SLUG}.md"
+  mkdir -p reports/inbox
+  cat > "$FILEPATH" << EOF
+---
+unix: $UNIX
+kind: $KIND
+severity: $SEVERITY
+detected_at: $ISO
+---
+# $TITLE
+
+$BODY
+EOF
+else
+  FILEPATH="reports/daily/${DATE}.md"
+  mkdir -p reports/daily
+  [ ! -f "$FILEPATH" ] && echo "# Daily Brand Pulse — $DATE" > "$FILEPATH"
+  printf '\n## [%s] %s: %s\n\n%s\n' "$ISO" "$KIND" "$TITLE" "$BODY" >> "$FILEPATH"
+fi
+
+git add "$FILEPATH"
+git -c user.name=openclaw-agent -c user.email=agent@sergeisolovev.com   commit -m "${SEVERITY}: ${KIND} — $(echo $TITLE | head -c 60)" --quiet || true
+git push origin main --quiet 2>/dev/null || true
+
+# Step 1b: audit log for high/critical
+if [[ "$SEVERITY" == "high" || "$SEVERITY" == "critical" ]]; then
+  mkdir -p "audit/$MONTH"
+  printf '{"unix":%s,"iso":"%s","kind":"%s","severity":"%s","slug":"%s","title":"%s","filepath":"%s"}\n'     "$UNIX" "$ISO" "$KIND" "$SEVERITY" "$SLUG" "$TITLE" "$FILEPATH" >> "audit/$MONTH/events.jsonl"
+  git add "audit/$MONTH/events.jsonl"
+  git commit -m "audit: $KIND" --quiet || true
+  git push origin main --quiet 2>/dev/null || true
+fi
+
+# Step 2: Telegram push for high/critical, now with inline keyboard
+if [[ "$SEVERITY" == "high" || "$SEVERITY" == "critical" ]]; then
+  EMOJI=$([ "$SEVERITY" == "critical" ] && echo '🚨 CRITICAL' || echo '🔔')
+  URL="https://github.com/SergeySolovyev/sergei-brand-agent-reports/blob/main/$FILEPATH"
+  TEXT=$(printf '%s *%s*: %s\n\n%s\n\nDetails: %s' "$EMOJI" "$KIND" "$TITLE" "$(echo "$BODY" | head -c 500)" "$URL")
+  # Pass kind+slug so tg_send attaches the right keyboard
+  /usr/local/bin/tg_send --kind "$KIND" --slug "$SLUG" "$TEXT"
+fi
+
+echo "emitted: $SEVERITY/$KIND → $FILEPATH"
