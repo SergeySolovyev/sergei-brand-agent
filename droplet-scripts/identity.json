@@ -1,0 +1,115 @@
+{
+  "_meta": {
+    "purpose": "Single source of truth for form-fill / OAuth / outreach. Picker chooses profile by email context.",
+    "owner": "Sergei Solovev",
+    "last_updated": "2026-05-28",
+    "instructions": "Edit profile fields freely. To add a new profile, copy any existing one and tweak `use_for` keywords."
+  },
+  "default_profile": "academic_hse",
+  "sender_overrides": {
+    "_doc": "Deterministic overrides — bypass LLM when sender domain matches. Picker still runs for unknown senders.",
+    "wandb.ai": "academic_hse",
+    "anthropic.com": "academic_hse",
+    "huggingface.co": "academic_hse",
+    "langchain.com": "academic_hse",
+    "deepmind.com": "academic_hse",
+    "openai.com": "academic_hse",
+    "papers.cool": "academic_hse",
+    "arxiv.org": "academic_hse",
+    "openzeppelin.com": "defi_security",
+    "immunefi.com": "defi_security",
+    "code4rena.com": "defi_security",
+    "trailofbits.com": "defi_security",
+    "ethglobal.com": "defi_security",
+    "dorahacks.io": "defi_security",
+    "kaggle.com": "independent_quant",
+    "aci-russia.ru": "tradfi_brokerage",
+    "psbank.ru": "tradfi_brokerage"
+  },
+  "_picker_principle": "Academic identity is the default — HSE affiliation gives credibility even at industry events. Switch to other profiles ONLY when the context clearly doesn't fit academia (hackathon competition, audit contest, banking conference, where HSE adds nothing or actively misfits).",
+  "phone_policy": "never_provide_escalate_if_required",
+  "marketing_opt_out": true,
+  "globals": {
+    "first_name": "Sergei",
+    "last_name": "Solovev",
+    "first_name_ru": "Сергей",
+    "last_name_ru": "Соловьёв",
+    "country": "Russia",
+    "city": "Moscow",
+    "linkedin": "https://www.linkedin.com/in/sergei-solovev/",
+    "github": "https://github.com/SergeySolovyev",
+    "website": "https://sergeisolovev.com",
+    "orcid": null,
+    "scholar": null,
+    "twitter_x": null
+  },
+  "profiles": {
+    "academic_hse": {
+      "label": "Academic — HSE University",
+      "email": "sesesolovev@edu.hse.ru",
+      "role": "Researcher",
+      "company": "HSE University, Faculty of Computer Science",
+      "title": "Research Assistant / Master's Student",
+      "bio_short": "HSE researcher in DeFi, RAG, and AI agents for finance.",
+      "use_for": [
+        "academic webinar", "academic conference", "research grant",
+        "RINC journal", "AIRI", "Skoltech", "МФТИ", "MIPT",
+        "Russian Science Foundation", "РНФ", "scholarship",
+        "PhD admission", "thesis defense",
+        "Weights & Biases", "Anthropic webinar", "LangChain webinar",
+        "quant research", "quant finance", "LOB", "market microstructure",
+        "Hugging Face talks", "research seminar", "ML research webinar",
+        "industry webinar", "industry conference", "fintech research"
+      ]
+    },
+    "independent_quant": {
+      "label": "Independent Quant Researcher",
+      "email": "sssolovjov@gmail.com",
+      "role": "Independent Researcher",
+      "company": "Independent",
+      "title": "Quant + AI Researcher",
+      "bio_short": "Independent researcher at the TradFi → AI → DeFi intersection. 5 figshare preprints on smart-contract security, RAG, LOB prediction.",
+      "use_for": [
+        "Kaggle competition", "Hugging Face competition", "prize competition",
+        "personal project showcase", "freelance gig", "consulting inquiry"
+      ]
+    },
+    "defi_security": {
+      "label": "DeFi Security Researcher",
+      "email": "sssolovjov@gmail.com",
+      "role": "DeFi Security Researcher",
+      "company": "sergeisolovev.com",
+      "title": "Smart-Contract Security Researcher",
+      "bio_short": "DeFi security researcher building honest-rag-solidity and ai-yield-vault. Focus: vulnerability detection, ERC-4626 safety, MEV.",
+      "use_for": [
+        "ETHGlobal", "DoraHacks", "hackathon", "smart contract audit",
+        "OpenZeppelin", "Immunefi", "ConsenSys", "Trail of Bits",
+        "Code4rena", "Sherlock", "Paradigm", "DeFi conf", "Devcon",
+        "ETHDenver", "ETHCC", "L2 ecosystem", "ZK"
+      ]
+    },
+    "tradfi_brokerage": {
+      "label": "TradFi — Banking Background",
+      "email": "sssolovjov@gmail.com",
+      "role": "TradFi to DeFi Transition Researcher",
+      "company": "ACI Russia (board member)",
+      "title": "Former Mosoblbank / PSB; ACI Russia board member",
+      "bio_short": "TradFi banking + brokerage operations background bridging into DeFi protocols.",
+      "use_for": [
+        "ACI Russia", "Russian banking", "trading operations",
+        "Mosoblbank", "PSB", "Promsvyazbank", "TradFi event"
+      ]
+    }
+  },
+  "do_not_consent": {
+    "auto_marketing_optin": true,
+    "auto_data_sharing_third_parties": true,
+    "auto_phone_share": true,
+    "auto_calendar_optin_marketing": true
+  },
+  "consent_yes": {
+    "session_recording_for_recap": true,
+    "newsletter_event_specific": true,
+    "speaker_followup_email": true
+  }
+}

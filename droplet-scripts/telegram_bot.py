@@ -336,6 +336,10 @@ ACTION_LABEL = {
     'sd': '✅ Sending email…',
     'ed': '✏️ Edit requested — reply with new text',
     'dd': '❌ Draft discarded',
+    'rg': '📝 Building registration preview…',
+    'rp': '✅ Submitting registration via Playwright…',
+    'rd': '🔄 Re-picking profile — new preview incoming',
+    'rc': '❌ Registration cancelled',
 }
 
 
@@ -471,6 +475,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "WHERE draft_id = ?",
                     (datetime.now(timezone.utc).isoformat(), int(slug)),
                 )
+        except Exception:
+            pass
+        return
+    if code == 'rg':
+        # Register go → spawn register_event.py preview with slug
+        import subprocess as _sp
+        _sp.Popen(
+            ['/opt/brand-agent/venv/bin/python',
+             '/opt/brand-agent/register_event.py', 'preview', slug],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+        return
+    if code == 'rp':
+        # Register proceed → submit (slug here is reg_id)
+        import subprocess as _sp
+        _sp.Popen(
+            ['/opt/brand-agent/venv/bin/python',
+             '/opt/brand-agent/register_event.py', 'submit', slug],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+        return
+    if code == 'rc':
+        # Cancel — mark registration as cancelled
+        try:
+            with sqlite3.connect(AGENT_STATE_DB) as conn:
+                conn.execute(
+                    "UPDATE registrations SET status='cancelled', decided_at=? "
+                    "WHERE reg_id=?",
+                    (datetime.now(timezone.utc).isoformat(), int(slug)),
+                )
+        except Exception:
+            pass
+        return
+    if code == 'rd':
+        # Re-pick: discard current preview and trigger fresh picker on same slug.
+        # Need to look up the original slug from registrations table.
+        try:
+            with sqlite3.connect(AGENT_STATE_DB) as conn:
+                row = conn.execute(
+                    "SELECT slug FROM registrations WHERE reg_id=?", (int(slug),),
+                ).fetchone()
+                if row:
+                    orig_slug = row[0]
+                    conn.execute(
+                        "UPDATE registrations SET status='cancelled' WHERE reg_id=?",
+                        (int(slug),),
+                    )
+                    import subprocess as _sp
+                    _sp.Popen(
+                        ['/opt/brand-agent/venv/bin/python',
+                         '/opt/brand-agent/register_event.py', 'preview', orig_slug],
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                    )
         except Exception:
             pass
         return

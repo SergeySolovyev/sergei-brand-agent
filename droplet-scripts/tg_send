@@ -61,8 +61,17 @@ def keyboard_for(kind: str, slug: str) -> dict | None:
     elif kind in ('openalex_citation', 'github_star'):
         rows = [[btn('📝 Compose post', 't'), btn('⏭ Skip', 's')]]
     elif kind in ('mention', 'inbound_mention'):
-        rows = [[btn('💬 Reply', 'r'), btn('🚫 Mute author', 'm'),
-                 btn('⏭ Skip', 's')]]
+        rows = [
+            [btn('💬 Reply', 'r'), btn('📝 Register', 'rg')],
+            [btn('🚫 Mute author', 'm'), btn('⏭ Skip', 's')],
+        ]
+    elif kind == 'register_preview':
+        # slug here is reg_id (numeric)
+        rows = [[
+            {'text': '✅ Proceed', 'callback_data': f'rp:{slug}'[:64]},
+            {'text': '🔄 Re-pick profile', 'callback_data': f'rd:{slug}'[:64]},
+            {'text': '❌ Cancel', 'callback_data': f'rc:{slug}'[:64]},
+        ]]
     elif kind == 'draft_reply':
         # slug here is actually the numeric draft_id
         rows = [
