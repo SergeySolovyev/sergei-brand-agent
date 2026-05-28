@@ -1,0 +1,160 @@
+#!/opt/brand-agent/venv/bin/python3
+"""Cron worker: fetch new Gmail messages, triage, emit events with buttons.
+
+Runs every 15 min. State (last_seen_history_id, processed_message_ids) lives
+in /root/.openclaw/agent_state.sqlite. Idempotent — re-running won't double-emit.
+
+For each new message:
+  1. Fetch metadata + first 2KB of body
+  2. Run triage.py classifier
+  3. If decision != 'skip':
+        emit_event <severity> email_inbound "<subject>" "<body+url>"
+     The button keyboard (added by tg_send via --kind=mention) gives Sergei:
+       [💬 Draft reply] [🚫 Mute sender] [⏭ Skip]
+"""
+from __future__ import annotations
+
+import base64
+import json
+import re
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, "/opt/brand-agent")  # so we can `import triage`
+
+from google.oauth2.credentials import Credentials  # noqa: E402
+from googleapiclient.discovery import build  # noqa: E402
+
+import triage  # noqa: E402
+
+STATE_DB = Path("/root/.openclaw/agent_state.sqlite")
+TOKEN_PATH = Path("/opt/brand-agent/secrets/gmail_token.json")
+SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+
+
+def _db():
+    conn = sqlite3.connect(STATE_DB)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS gmail_seen "
+        "(message_id TEXT PRIMARY KEY, processed_at TEXT)"
+    )
+    return conn
+
+
+def _already_seen(conn, message_id: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM gmail_seen WHERE message_id = ?", (message_id,)
+    ).fetchone() is not None
+
+
+def _mark_seen(conn, message_id: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO gmail_seen VALUES (?, ?)",
+        (message_id, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def _extract_body(payload) -> str:
+    """Walk MIME tree, return first text/plain body decoded, truncated to 2KB."""
+    def _walk(part):
+        if part.get("mimeType") == "text/plain" and "data" in part.get("body", {}):
+            try:
+                return base64.urlsafe_b64decode(
+                    part["body"]["data"]
+                ).decode("utf-8", errors="ignore")
+            except Exception:
+                return ""
+        for sub in part.get("parts", []) or []:
+            r = _walk(sub)
+            if r:
+                return r
+        return ""
+
+    body = _walk(payload)
+    return body[:2048]
+
+
+def _emit(severity: str, subject: str, body: str, message_id: str, sender: str):
+    """Call emit_event. Use kind=mention so buttons show [Reply/Mute/Skip]."""
+    gmail_url = f"https://mail.google.com/mail/u/0/#inbox/{message_id}"
+    full_body = (
+        f"From: {sender}\n"
+        f"Subject: {subject}\n\n"
+        f"{body}\n\n"
+        f"Open in Gmail: {gmail_url}"
+    )
+    title = f"📧 {subject[:60]}"
+    subprocess.run(
+        ["/usr/local/bin/emit_event", severity, "mention", title, full_body],
+        check=False,
+    )
+
+
+def main() -> int:
+    if not TOKEN_PATH.exists():
+        print(f"FAIL: {TOKEN_PATH} missing — run gmail_auth.py exchange first")
+        return 1
+
+    creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+
+    conn = _db()
+    try:
+        # Fetch INBOX, last 30 messages. We dedupe via gmail_seen so it's safe
+        # to over-fetch.
+        listing = (
+            service.users()
+            .messages()
+            .list(userId="me", labelIds=["INBOX", "UNREAD"], maxResults=30)
+            .execute()
+        )
+        msgs = listing.get("messages", [])
+        new_count = 0
+        emitted_count = 0
+        for ref in msgs:
+            mid = ref["id"]
+            if _already_seen(conn, mid):
+                continue
+            try:
+                msg = (
+                    service.users()
+                    .messages()
+                    .get(userId="me", id=mid, format="full")
+                    .execute()
+                )
+            except Exception as e:
+                print(f"fetch error {mid}: {e}")
+                continue
+            headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+            subject = headers.get("Subject", "(no subject)")
+            sender = headers.get("From", "(unknown)")
+            body = _extract_body(msg["payload"])
+
+            decision = triage.triage(sender, subject, body)
+            new_count += 1
+            if decision["decision"] != "skip":
+                _emit(
+                    severity=decision["severity"],
+                    subject=subject,
+                    body=body,
+                    message_id=mid,
+                    sender=sender,
+                )
+                emitted_count += 1
+            _mark_seen(conn, mid)
+            conn.commit()
+
+        print(
+            f"gmail triage: scanned={len(msgs)} new={new_count} "
+            f"emitted={emitted_count} at {datetime.now(timezone.utc).isoformat()}"
+        )
+    finally:
+        conn.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

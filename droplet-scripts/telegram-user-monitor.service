@@ -1,0 +1,17 @@
+[Unit]
+Description=Sergei Brand Agent — Telegram User API monitor (Telethon)
+After=network.target
+# Requires .env populated with TG_USER_API_ID, TG_USER_API_HASH, TG_USER_PHONE
+# AND a one-time auth pass: /opt/brand-agent/venv/bin/python telegram_user_monitor.py auth
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/brand-agent
+ExecStart=/opt/brand-agent/venv/bin/python /opt/brand-agent/telegram_user_monitor.py run
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/telegram-user-monitor.log
+StandardError=append:/var/log/telegram-user-monitor.log
+
+[Install]
+WantedBy=multi-user.target
