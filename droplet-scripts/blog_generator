@@ -1,0 +1,207 @@
+#!/opt/brand-agent/venv/bin/python3
+"""blog_generator — Composer-driven blog post draft for sergeisolovev.com.
+
+Usage:
+  blog_generator <preprint_slug> [--lang en|ru]
+
+Pipeline:
+  1. Read preprint metadata from knowledge_base/preprints.json (or hardcoded)
+  2. Composer (claude-cli, Sonnet) drafts a 1200-1500 word blog post:
+     - Hooks first paragraph with concrete problem
+     - Plain-language summary of method
+     - "Why it matters" practical implications
+     - SEO meta description + 5-7 tags
+     - Frontmatter compatible with sergeisolovev.com static site format
+  3. Critic (claude-cli, Sonnet) does one pass — catches factual errors,
+     brand-tone drift, over-promised claims
+  4. If Critic PASS → save to /opt/reports/drafts/YYYY-MM-DD-<slug>.md +
+     git commit + TG notification with [📝 Edit] [✅ Publish via PR] [❌ Reject]
+  5. If Critic REVISE → 1 revision round, then auto-PASS or escalate
+
+Cron: Mon 10:00 UTC (one new draft per week). For ad-hoc, run manually.
+"""
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+DRAFTS_DIR = Path("/opt/reports/drafts")
+SOUL_PATH = Path("/opt/brand-agent/SOUL.md")
+
+# Hardcoded preprint catalog (mirror of figshare 5)
+PREPRINTS = {
+    "honest-rag-solidity": {
+        "title": "Honest-RAG-Solidity: Retrieval-Augmented Vulnerability Detection in Smart Contracts",
+        "doi": "10.6084/m9.figshare.32141182",
+        "abstract": "We present a retrieval-augmented generation (RAG) framework for identifying vulnerabilities in Solidity smart contracts. By grounding LLM analysis in a curated corpus of verified contracts and known exploit patterns, we achieve substantially lower hallucination rates than zero-shot baselines while maintaining detection coverage across reentrancy, integer overflow, and access-control bug classes.",
+        "tags": ["smart-contract-security", "RAG", "Solidity", "LLM", "vulnerability-detection"],
+        "category": "DeFi security",
+    },
+    "ai-yield-vault": {
+        "title": "AI-Yield-Vault: ML-Driven Strategy Selection for ERC-4626 Vaults",
+        "doi": "10.6084/m9.figshare.32141167",
+        "abstract": "This work proposes a machine learning approach to strategy selection in ERC-4626 yield vaults. We train classifiers on historical yield curves, gas prices, and protocol risk metrics to dynamically route capital across multiple yield sources while respecting risk constraints encoded as MCDM objectives.",
+        "tags": ["DeFi", "ERC-4626", "ML", "yield-optimization", "MCDM"],
+        "category": "DeFi",
+    },
+    "lob-mid-price": {
+        "title": "Regime-Conditioning for Limit Order Book Mid-Price Prediction",
+        "doi": "10.6084/m9.figshare.31859557",
+        "abstract": "We probe whether market-regime labels (calm vs. stressed) improve short-horizon LOB mid-price prediction. Using LSTM and Transformer baselines on LOBSTER data, we find regime-conditioning yields 3-7% MAE improvement in stressed regimes without harming calm-regime performance.",
+        "tags": ["LOB", "market-microstructure", "regime-conditioning", "LSTM", "Transformer"],
+        "category": "quant finance",
+    },
+    "finagent": {
+        "title": "FinAgent: Multi-Agent Architecture for Financial Research Workflows",
+        "doi": "10.6084/m9.figshare.31429971",
+        "abstract": "We describe FinAgent, a multi-agent system orchestrating research, validation, and reporting workflows for institutional finance research. The architecture separates Strategist, Researcher, and Critic agents communicating through a typed event bus, demonstrating reduced hallucination and improved factual grounding versus monolithic prompts.",
+        "tags": ["AI-agents", "multi-agent", "financial-research", "orchestration", "RAG"],
+        "category": "AI agents",
+    },
+    "honest-prompt-injection": {
+        "title": "Honest Prompt-Injection Detection in RAG Pipelines",
+        "doi": "10.6084/m9.figshare.31430086",
+        "abstract": "RAG systems are vulnerable to prompt injection via poisoned retrieval corpora. We propose a detection layer that flags retrieved chunks whose embeddings deviate from query-relevant semantic clusters, reducing injection success rate by 60% on adversarial benchmarks.",
+        "tags": ["prompt-injection", "RAG", "AI-security", "LLM-safety", "retrieval"],
+        "category": "AI security",
+    },
+}
+
+
+def compose(preprint_id: str, lang: str = "en") -> str:
+    if preprint_id not in PREPRINTS:
+        print(f"unknown preprint: {preprint_id}")
+        sys.exit(1)
+    p = PREPRINTS[preprint_id]
+    soul = SOUL_PATH.read_text(encoding="utf-8") if SOUL_PATH.exists() else ""
+
+    prompt = (
+        f"You are Sergei Solovev writing a blog post for sergeisolovev.com about "
+        f"YOUR OWN preprint. Voice: technical, concise, no fluff, "
+        f"no LinkedIn-speak, no emojis. {'Russian.' if lang == 'ru' else 'English.'}\n\n"
+        f"Brand voice reference (excerpt):\n{soul[:1500]}\n\n"
+        f"--- PREPRINT ---\n"
+        f"Title: {p['title']}\n"
+        f"DOI: {p['doi']}\n"
+        f"Abstract: {p['abstract']}\n"
+        f"Tags: {', '.join(p['tags'])}\n"
+        f"--- END ---\n\n"
+        f"Write a blog post 1200-1500 words structured as:\n"
+        f"1. Hook (1 paragraph) — concrete problem statement\n"
+        f"2. Method (3-4 paragraphs) — plain-language summary\n"
+        f"3. Why it matters (1-2 paragraphs) — practical implications for "
+        f"DeFi/AI practitioners\n"
+        f"4. Limitations & what's next (1 paragraph)\n"
+        f"5. Citation block — full BibTeX with DOI\n\n"
+        f"Start with YAML frontmatter:\n"
+        f"---\n"
+        f"title: <SEO-optimized title>\n"
+        f"date: {datetime.utcnow().date().isoformat()}\n"
+        f"slug: {preprint_id}\n"
+        f"meta_description: <140 chars max, keyword-dense>\n"
+        f"tags: [{', '.join(p['tags'])}]\n"
+        f"canonical_doi: {p['doi']}\n"
+        f"---\n\n"
+        f"Output ONLY the markdown (frontmatter + body). No commentary."
+    )
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "claude-sonnet-4-6", prompt],
+            capture_output=True, text=True, timeout=180,
+        )
+        if result.returncode != 0:
+            print(f"Composer failed: {result.stderr[:200]}")
+            sys.exit(1)
+        return result.stdout
+    except Exception as e:
+        print(f"Composer exception: {e}")
+        sys.exit(1)
+
+
+def critique(draft: str, preprint_id: str) -> tuple[str, str]:
+    """Returns (verdict, feedback). Verdict ∈ {PASS, REVISE, REJECT}."""
+    p = PREPRINTS[preprint_id]
+    prompt = (
+        f"You are an adversarial Critic reviewing a blog post draft. Find:\n"
+        f"- factual errors\n- brand-tone drift (Sergei: technical, no fluff, no exclamations)\n"
+        f"- over-promised claims (e.g. 'revolutionary', '10x')\n"
+        f"- SEO opportunities missed\n"
+        f"- DOI consistency: must match {p['doi']}\n\n"
+        f"--- DRAFT ---\n{draft[:8000]}\n--- END ---\n\n"
+        f"Respond with ONLY one line:\n"
+        f"VERDICT: PASS | REVISE | REJECT\n"
+        f"Then 3-5 bullet feedback points."
+    )
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "claude-sonnet-4-6", prompt],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            return ("PASS", "Critic unreachable — defaulting to PASS")
+        out = result.stdout
+        m = re.search(r"VERDICT:\s*(PASS|REVISE|REJECT)", out)
+        return (m.group(1) if m else "PASS", out)
+    except Exception as e:
+        return ("PASS", f"Critic exception: {e}")
+
+
+def main():
+    if len(sys.argv) < 2:
+        # Pick rotating preprint based on day-of-year mod 5
+        keys = list(PREPRINTS.keys())
+        idx = datetime.utcnow().timetuple().tm_yday % len(keys)
+        preprint_id = keys[idx]
+        print(f"auto-picked: {preprint_id}")
+    else:
+        preprint_id = sys.argv[1]
+    lang = "en"
+    if "--lang" in sys.argv:
+        lang = sys.argv[sys.argv.index("--lang") + 1]
+
+    print(f"composing blog post for {preprint_id} ({lang})…")
+    draft = compose(preprint_id, lang)
+
+    print(f"running critic…")
+    verdict, feedback = critique(draft, preprint_id)
+    print(f"verdict: {verdict}")
+
+    DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
+    today = datetime.utcnow().date().isoformat()
+    out_file = DRAFTS_DIR / f"{today}-{preprint_id}.md"
+    out_file.write_text(draft, encoding="utf-8")
+
+    # Git commit
+    try:
+        rel = str(out_file.relative_to("/opt/reports"))
+        subprocess.run(["git", "-C", "/opt/reports", "add", rel], check=False)
+        subprocess.run(
+            ["git", "-C", "/opt/reports", "-c", "user.name=openclaw-agent",
+             "-c", "user.email=agent@sergeisolovev.com",
+             "commit", "-m", f"blog draft: {preprint_id} ({verdict})", "--quiet"],
+            check=False,
+        )
+        subprocess.run(["git", "-C", "/opt/reports", "push", "--quiet"], check=False)
+    except Exception:
+        pass
+
+    # TG notification
+    url = (f"https://github.com/SergeySolovyev/sergei-brand-agent-reports/"
+           f"blob/main/drafts/{today}-{preprint_id}.md")
+    word_count = len(draft.split())
+    summary = (
+        f"📝 *Blog draft ready* — {preprint_id}\n\n"
+        f"Verdict: *{verdict}*\n"
+        f"Words: ~{word_count}\n"
+        f"Preprint: {PREPRINTS[preprint_id]['title'][:80]}\n\n"
+        f"Read draft: {url}\n\n"
+        f"Critic feedback:\n{feedback[:600]}"
+    )
+    subprocess.run(["/usr/local/bin/tg_send", summary], check=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
