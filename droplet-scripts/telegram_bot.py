@@ -559,19 +559,12 @@ async def cmd_dashboard(update: Update, _: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Refresh failed: {e}")
         return
-    url = (
-        "https://htmlpreview.github.io/?https://github.com/SergeySolovyev/"
-        "sergei-brand-agent-reports/blob/main/dashboard/index.html"
-    )
-    raw = (
-        "https://raw.githubusercontent.com/SergeySolovyev/"
-        "sergei-brand-agent-reports/main/dashboard/index.html"
-    )
+    url = "http://134.209.230.86/dashboard/"
     await update.message.reply_text(
         f"🚀 *Mission Control* refreshed.\n\n"
-        f"🖥 Rendered: {url}\n"
-        f"📄 Raw HTML: {raw}\n\n"
-        f"_Tip: bookmark the htmlpreview link — auto-updates on each emit._",
+        f"🖥 {url}\n\n"
+        f"_user: `sergei` (password — see pinned message)_\n"
+        f"_Auto-refresh after each emit. Bookmark for one-click access._",
         parse_mode="Markdown",
     )
 
