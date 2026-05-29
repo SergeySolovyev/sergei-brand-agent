@@ -200,6 +200,17 @@ def main():
     feedback_file = app_dir / f"{today}-critic-feedback.txt"
     feedback_file.write_text(feedback, encoding="utf-8")
 
+    # Render .docx alongside .md — required for portal submit (РНФ/ФСИ)
+    docx_file = app_dir / f"{today}-draft.docx"
+    try:
+        sys.path.insert(0, "/opt/brand-agent")
+        import render_docx
+        title_for_docx = f"Заявка: {grant.get('title', '')[:120]}"
+        render_docx.markdown_to_docx(draft, str(docx_file), title=title_for_docx)
+    except Exception as e:
+        print(f"docx render warning: {e}")
+        docx_file = None
+
     # Git commit
     try:
         rel = draft_file.relative_to("/opt/reports")
@@ -208,6 +219,11 @@ def main():
             ["git", "-C", "/opt/reports", "add",
              str(feedback_file.relative_to("/opt/reports"))], check=False,
         )
+        if docx_file:
+            subprocess.run(
+                ["git", "-C", "/opt/reports", "add",
+                 str(docx_file.relative_to("/opt/reports"))], check=False,
+            )
         subprocess.run(
             ["git", "-C", "/opt/reports", "-c", "user.name=openclaw-agent",
              "-c", "user.email=agent@sergeisolovev.com",
@@ -221,14 +237,20 @@ def main():
 
     # TG notification
     word_count = len(draft.split())
+    base_url = (
+        "https://github.com/SergeySolovyev/sergei-brand-agent-reports/"
+        f"blob/main/applications/{safe_slug}/{today}-draft"
+    )
+    docx_line = (f"\n📎 .docx (portal-ready): {base_url}.docx?raw=1"
+                 if docx_file else "")
     summary = (
         f"📋 *Grant application draft ready*\n\n"
         f"Grant: {grant.get('title', '?')[:80]}\n"
         f"Amount: {grant.get('amount', '?')}\n"
         f"Deadline: {grant.get('deadline', '?')}\n"
         f"Verdict: *{verdict}* · ~{word_count} words · profile {profile_key}\n\n"
-        f"Draft:\nhttps://github.com/SergeySolovyev/sergei-brand-agent-reports/"
-        f"blob/main/applications/{safe_slug}/{today}-draft.md\n\n"
+        f"📝 .md (edit-friendly): {base_url}.md"
+        f"{docx_line}\n\n"
         f"Critic notes:\n{feedback[:500]}"
     )
     subprocess.run(["/usr/local/bin/tg_send", summary], check=False)
