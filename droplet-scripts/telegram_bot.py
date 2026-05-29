@@ -546,6 +546,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @require_auth
+@require_auth
+async def cmd_dashboard(update: Update, _: ContextTypes.DEFAULT_TYPE):
+    """Regenerate dashboard.html and reply with the GitHub URL."""
+    import subprocess as _sp
+    await update.message.reply_text("🚀 Refreshing cockpit…")
+    try:
+        _sp.run(
+            ['/opt/brand-agent/venv/bin/python', '/opt/brand-agent/dashboard.py'],
+            timeout=90, capture_output=True,
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Refresh failed: {e}")
+        return
+    url = (
+        "https://htmlpreview.github.io/?https://github.com/SergeySolovyev/"
+        "sergei-brand-agent-reports/blob/main/dashboard/index.html"
+    )
+    raw = (
+        "https://raw.githubusercontent.com/SergeySolovyev/"
+        "sergei-brand-agent-reports/main/dashboard/index.html"
+    )
+    await update.message.reply_text(
+        f"🚀 *Mission Control* refreshed.\n\n"
+        f"🖥 Rendered: {url}\n"
+        f"📄 Raw HTML: {raw}\n\n"
+        f"_Tip: bookmark the htmlpreview link — auto-updates on each emit._",
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_menu(update: Update, _: ContextTypes.DEFAULT_TYPE):
     """Pin-friendly message with global commands as buttons."""
     keyboard = InlineKeyboardMarkup([
@@ -582,6 +612,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("digest", cmd_digest))
     app.add_handler(CommandHandler("pulse", cmd_pulse))
     app.add_handler(CommandHandler("menu", cmd_menu))
+    app.add_handler(CommandHandler("dashboard", cmd_dashboard))
     app.add_handler(CallbackQueryHandler(on_callback))
     return app
 
