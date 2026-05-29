@@ -177,17 +177,32 @@ def collect() -> tuple[dict, list[str]]:
 def main() -> int:
     hour_msk = _msk_hour()
     snap, lines = collect()
-
-    # Compute is_quiet — but always run on first 5 min of each hour
     prev = _last_snapshot()
-    is_quiet_hour = 0 <= hour_msk < 7
-    any_delta = any(
-        snap.get(k, 0) != prev.get(k, 0)
-        for k in ("gmail_seen_total", "audit_events_total",
-                  "actions_total", "draft_pending")
+
+    # Wider quiet window — Sergei sleeps roughly 23:00-09:00 MSK.
+    # 22:00-09:00 = always suppress regardless of delta.
+    is_quiet_hour = hour_msk >= 22 or hour_msk < 9
+
+    # Meaningful-delta threshold:
+    # - any change in audit_events / actions / drafts / registrations
+    #   → real activity, fire pulse
+    # - gmail trickle (+1-4 per pulse) is noise, suppress
+    # - gmail ≥ 5 in one pulse → busy inbox, worth a ping
+    meaningful_delta = (
+        (snap.get("audit_events_total", 0) - prev.get("audit_events_total", 0)) > 0 or
+        (snap.get("actions_total", 0) - prev.get("actions_total", 0)) > 0 or
+        (snap.get("draft_pending", 0) - prev.get("draft_pending", 0)) > 0 or
+        (snap.get("reg_submitted", 0) - prev.get("reg_submitted", 0)) > 0 or
+        (snap.get("gmail_seen_total", 0) - prev.get("gmail_seen_total", 0)) >= 5
     )
-    if is_quiet_hour and not any_delta:
-        # Skip silent pings at night
+
+    # Quiet hour suppression — total silence unless meaningful
+    if is_quiet_hour and not meaningful_delta:
+        _save_snapshot(snap)
+        return 0
+
+    # Daytime — also suppress if nothing meaningful happened
+    if not meaningful_delta:
         _save_snapshot(snap)
         return 0
 
