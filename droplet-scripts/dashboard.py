@@ -35,6 +35,12 @@ AUDIT_DIR = REPORTS_ROOT / "audit"
 DASH_DIR = REPORTS_ROOT / "dashboard"
 DASH_HTML = DASH_DIR / "index.html"
 
+# Public mirror via GitHub Pages (sergeisolovev.com)
+# Slug is random; only Sergei knows the URL. Bookmark and don't share.
+SLUG_PATH = Path("/opt/brand-agent/secrets/cockpit_slug.txt")
+PUBLIC_REPO = Path("/opt/sergeisolovev_com")
+PUBLIC_REPO_GIT_URL = "github-sergeisolovevcom:SergeySolovyev/sergeisolovev.com.git"
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Section data extractors
@@ -344,6 +350,9 @@ def render_html() -> str:
 <html lang="ru"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
+<meta name="googlebot" content="noindex,nofollow,noarchive,nosnippet">
+<meta name="referrer" content="no-referrer">
 <title>🚀 Sergei Brand Agent — Mission Control</title>
 <style>
   body {{ font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
@@ -510,13 +519,84 @@ def render_html() -> str:
 # ─────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────
+def _publish_to_public_repo(html: str) -> None:
+    """Dual-push to sergeisolovev_build (public GitHub Pages) at random slug.
+
+    Silently no-ops if deploy key not yet added or repo not cloned. This
+    keeps the on-emit hook resilient: dashboard always writes to the
+    nginx-served local path; public mirror is best-effort.
+    """
+    if not SLUG_PATH.exists():
+        return
+    slug = SLUG_PATH.read_text().strip()
+    if not slug:
+        return
+
+    # Lazy clone on first use
+    if not (PUBLIC_REPO / ".git").exists():
+        try:
+            r = subprocess.run(
+                ["git", "clone", PUBLIC_REPO_GIT_URL, str(PUBLIC_REPO)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if r.returncode != 0:
+                # Deploy key not added yet — skip silently
+                return
+        except Exception:
+            return
+
+    # Write HTML at random slug path
+    out_dir = PUBLIC_REPO / slug
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "index.html").write_text(html, encoding="utf-8")
+
+    # Defensive robots.txt — block crawlers even if meta missed
+    robots = PUBLIC_REPO / "robots.txt"
+    robots_text = robots.read_text() if robots.exists() else ""
+    disallow_line = f"Disallow: /{slug}/"
+    if disallow_line not in robots_text:
+        # Append a User-agent: * Disallow block if not present
+        if "User-agent: *" not in robots_text:
+            robots_text += "\nUser-agent: *\n"
+        robots_text += disallow_line + "\n"
+        robots.write_text(robots_text)
+
+    try:
+        subprocess.run(
+            ["git", "-C", str(PUBLIC_REPO), "pull", "--quiet", "--rebase"],
+            check=False, timeout=15,
+        )
+        subprocess.run(
+            ["git", "-C", str(PUBLIC_REPO), "add",
+             f"{slug}/index.html", "robots.txt"],
+            check=False, timeout=10,
+        )
+        subprocess.run(
+            ["git", "-C", str(PUBLIC_REPO),
+             "-c", "user.name=openclaw-agent",
+             "-c", "user.email=agent@sergeisolovev.com",
+             "commit", "-m",
+             f"cockpit: refresh {datetime.utcnow().strftime('%H:%M')}",
+             "--quiet"], check=False, timeout=10,
+        )
+        subprocess.run(
+            ["git", "-C", str(PUBLIC_REPO), "push", "--quiet"],
+            check=False, timeout=20,
+        )
+    except Exception as e:
+        print(f"public mirror push warning: {e}")
+
+
 def main() -> int:
     DASH_DIR.mkdir(parents=True, exist_ok=True)
     html = render_html()
     DASH_HTML.write_text(html, encoding="utf-8")
     print(f"✓ dashboard rendered: {DASH_HTML}")
 
-    # git commit + push (quiet failures — don't block emit_event hook)
+    # Mirror to public sergeisolovev_build (GitHub Pages)
+    _publish_to_public_repo(html)
+
+    # git commit + push private reports repo (audit trail)
     try:
         subprocess.run(
             ["git", "-C", str(REPORTS_ROOT), "add", "dashboard/index.html"],

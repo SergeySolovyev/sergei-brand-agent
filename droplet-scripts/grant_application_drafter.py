@@ -111,14 +111,11 @@ def _compose_application(grant: dict, profile: dict, soul: str) -> str:
         "1 paragraph linking to grant's stated priorities.\n\n"
         "Output ONLY the markdown. No commentary."
     )
+    # Grant applications are high-stakes + irreversible (deadline) → Opus tier.
     try:
-        r = subprocess.run(
-            ["claude", "-p", "--model", "claude-sonnet-4-6", prompt],
-            capture_output=True, text=True, timeout=240,
-        )
-        if r.returncode != 0:
-            return ""
-        return r.stdout
+        sys.path.insert(0, "/opt/brand-agent")
+        from model_router import run_llm
+        return run_llm("grant_application", prompt, timeout=300)
     except Exception as e:
         print(f"composer error: {e}")
         return ""
@@ -179,7 +176,22 @@ def main():
         return 1
 
     verdict, feedback = _critique(draft, grant)
-    print(f"verdict: {verdict}")
+    print(f"critic verdict: {verdict}")
+
+    # Second gate: Verifier checks CORRECTNESS (false DOIs, fake credentials,
+    # overclaiming). High-stakes → 3-vote ensemble. Distinct from Critic.
+    verify_result = {"verdict": "SKIP", "issues": []}
+    try:
+        sys.path.insert(0, "/opt/brand-agent")
+        import verifier
+        verify_result = verifier.verify(
+            draft, f"Grant application for {grant.get('title','')}",
+            high_stakes=True,
+        )
+        print(f"verifier verdict: {verify_result['verdict']} "
+              f"({verify_result.get('pass_count','?')}/3 votes)")
+    except Exception as e:
+        print(f"verifier error: {e}")
 
     # Save
     safe_slug = re.sub(r"[^a-z0-9-]+", "-", slug.lower())[:40]
@@ -243,12 +255,20 @@ def main():
     )
     docx_line = (f"\n📎 .docx (portal-ready): {base_url}.docx?raw=1"
                  if docx_file else "")
+    vr = verify_result.get("verdict", "SKIP")
+    vr_emoji = {"PASS": "✅", "FAIL": "🚫", "SKIP": "—"}.get(vr, "—")
+    vr_issues = verify_result.get("issues", [])
+    vr_line = f"Verifier: {vr_emoji} {vr}"
+    if vr == "FAIL" and vr_issues:
+        vr_line += "\n⚠️ Correctness issues:\n" + "\n".join(
+            f"  • {i}" for i in vr_issues[:4])
     summary = (
         f"📋 *Grant application draft ready*\n\n"
         f"Grant: {grant.get('title', '?')[:80]}\n"
         f"Amount: {grant.get('amount', '?')}\n"
         f"Deadline: {grant.get('deadline', '?')}\n"
-        f"Verdict: *{verdict}* · ~{word_count} words · profile {profile_key}\n\n"
+        f"Critic: *{verdict}* · {vr_line}\n"
+        f"~{word_count} words · profile {profile_key} · model Opus\n\n"
         f"📝 .md (edit-friendly): {base_url}.md"
         f"{docx_line}\n\n"
         f"Critic notes:\n{feedback[:500]}"
