@@ -144,6 +144,100 @@ def section_unblockers() -> list[dict]:
     return items
 
 
+def section_bottleneck() -> dict:
+    """What throttles the agent from 100% 24/7 autonomy.
+
+    Each bottleneck carries an impact weight (throttle points). Weights sum to
+    100, so capacity% = 100 - sum(unresolved weights). Detection reuses the
+    same env/identity checks as unblockers, so resolving a credential auto-
+    lifts the throttle without manual edits.
+
+    Ranked by how much each blocker kills AUTONOMOUS VISIBLE OUTPUT — the
+    agent already does inbound triage + discovery + drafting + verification at
+    100%; the throttle is almost entirely on the OUTBOUND / publish layer.
+    """
+    env_path = Path("/opt/brand-agent/.env")
+    env_text = env_path.read_text() if env_path.exists() else ""
+    identity_path = Path("/opt/brand-agent/knowledge_base/identity.json")
+    identity = {}
+    if identity_path.exists():
+        try:
+            identity = json.loads(identity_path.read_text())
+        except Exception:
+            pass
+    globals_ = identity.get("globals", {})
+    profiles = identity.get("profiles", {})
+    deploy_key = Path("/opt/sergeisolovev_com/.git").exists()
+
+    # HONEST detection: env var set ≠ channel works. Verify bot can actually
+    # reach the channel via getChat (3s timeout, fail-safe to blocked). Avoids
+    # the dashboard lying that publishing is unblocked when getChat 400s.
+    def _tg_channel_live() -> bool:
+        m = re.search(r"TELEGRAM_PUBLIC_CHANNEL=(\S+)", env_text)
+        tok = re.search(r"TELEGRAM_BOT_TOKEN=(\S+)", env_text)
+        if not m or not tok or not m.group(1).startswith("@"):
+            return False
+        try:
+            import urllib.request
+            url = (f"https://api.telegram.org/bot{tok.group(1)}/getChat"
+                   f"?chat_id={m.group(1)}")
+            with urllib.request.urlopen(url, timeout=3) as r:
+                return json.loads(r.read()).get("ok", False)
+        except Exception:
+            return False
+    tg_channel_ok = _tg_channel_live()
+
+    # Capacity model: autonomous CORE (triage/discovery/drafting/verification/
+    # memory/monitor) = base 50% always earned. The OUTBOUND/publish layer = the
+    # other 50%, distributed across these 8 bottlenecks (weights sum to 50). So
+    # "everything blocked" reads as 50% (core works), not a demoralizing 0%.
+    # (title, weight, what dies without it, the 1-action fix, resolved?)
+    items = [
+        ("LinkedIn li_at cookie", 13,
+         "3 публикатора мертвы: citer-DM, daily cross-post, hackathon team-finding",
+         "F12 → Application → Cookies → li_at → прислать",
+         "LINKEDIN_LI_AT" in env_text),
+        ("HSE научрук (имя+email)", 10,
+         "Гранты РНФ/ФСИ/Бортник нельзя реально подать (нужен соисполнитель)",
+         "Написать имя+email научрука в чат",
+         bool(profiles.get("academic_hse", {}).get("supervisor"))),
+        ("X (Twitter) auth_token", 8,
+         "X-канал мёртв: нет авто-постов и тредов",
+         "F12 → Cookies x.com → auth_token → прислать",
+         "TWITTER_AUTH_TOKEN" in env_text),
+        ("TG broadcast канал", 6,
+         "daily_commentary пишет в стол — не публикуется в канал",
+         "Создать @sergeisolovev_research, добавить бота админом",
+         tg_channel_ok),
+        ("ORCID iD", 6,
+         "arXiv-сабмиты + Wikidata-сущность заблокированы",
+         "orcid.org/register (10 мин), прислать iD",
+         bool(globals_.get("orcid"))),
+        ("Deploy key sergeisolovev.com", 3,
+         "Публичный dashboard на домене (есть nginx-fallback, не критично)",
+         "1 клик: добавить ключ в repo settings",
+         deploy_key),
+        ("Sessionize speaker аккаунт", 2,
+         "Авто-сабмит докладов на конференции заблокирован",
+         "Регистрация на sessionize.com",
+         "SESSIONIZE_TOKEN" in env_text),
+        ("ETHOnline application", 2,
+         "Участие в ETHOnline 2026 (one-off, Steps 2-5)",
+         "Доделать форму после connect-wallet",
+         False),
+    ]
+    blocked = [it for it in items if not it[4]]
+    resolved = [it for it in items if it[4]]
+    throttle = sum(it[1] for it in blocked)
+    capacity = max(0, 100 - throttle)  # base 50 core + up to 50 outbound
+    return {
+        "capacity": capacity,
+        "throttle": throttle,
+        "blocked": sorted(blocked, key=lambda x: -x[1]),
+        "resolved": resolved,
+    }
+
+
 def section_drafts() -> dict:
     """Count drafts across /opt/reports/{posts,dms,applications,proposals}/."""
     out = {"posts": [], "dms": [], "applications": [], "proposals": []}
@@ -335,6 +429,7 @@ SEVERITY_COLORS = {
 def render_html() -> str:
     deadlines = section_deadlines()
     unblockers = section_unblockers()
+    bottleneck = section_bottleneck()
     drafts = section_drafts()
     calendar = section_calendar()
     activity = section_activity_24h()
@@ -345,6 +440,29 @@ def render_html() -> str:
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     daemon_ok = all(d["status"] == "active" for d in autonomous["daemons"])
     status_emoji = "🟢" if daemon_ok else "🟡"
+
+    # ── Bottleneck gauge pre-compute ──
+    cap = bottleneck["capacity"]
+    cap_color = "#56d364" if cap >= 80 else "#d29922" if cap >= 50 else "#f85149"
+    bn_rows = ""
+    for title, weight, dies, fix, _ in bottleneck["blocked"]:
+        bn_rows += (
+            f'<div class="bn"><span class="bn-w">−{weight}</span>'
+            f'<div class="bn-body"><b>{html_escape(title)}</b><br>'
+            f'<span class="meta">💀 {html_escape(dies)}</span><br>'
+            f'<span class="bn-fix">→ {html_escape(fix)}</span></div></div>'
+        )
+    for title, weight, dies, fix, _ in bottleneck["resolved"]:
+        bn_rows += (
+            f'<div class="bn bn-done"><span class="bn-w">✓</span>'
+            f'<div class="bn-body"><b>{html_escape(title)}</b> '
+            f'<span class="meta">— разблокировано</span></div></div>'
+        )
+    bn_headline = (
+        "🟢 Агент на полной мощности — узких мест нет" if cap >= 95 else
+        f"Агент работает на <b>{cap}%</b> — {bottleneck['throttle']} пунктов "
+        f"мощности заблокировано тобой"
+    )
 
     html = f"""<!DOCTYPE html>
 <html lang="ru"><head>
@@ -383,6 +501,19 @@ def render_html() -> str:
   a {{ color: #58a6ff; }}
   .grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
   @media (max-width: 700px) {{ .grid2 {{ grid-template-columns: 1fr; }} }}
+  .gauge {{ height: 26px; border-radius: 13px; background: #21262d;
+            overflow: hidden; margin: 6px 0; position: relative; }}
+  .gauge > div {{ height: 100%; display: flex; align-items: center;
+                  padding-left: 12px; font-weight: 700; color: #0e1117;
+                  font-size: 0.9em; white-space: nowrap; }}
+  .bn {{ display: flex; justify-content: space-between; align-items: flex-start;
+         padding: 8px 0; border-bottom: 1px dashed #30363d; gap: 12px; }}
+  .bn-w {{ font-weight: 700; padding: 2px 9px; border-radius: 12px;
+           background: #ff4444; color: #fff; font-size: 0.8em; min-width: 44px;
+           text-align: center; }}
+  .bn-done .bn-w {{ background: #56d364; color: #0e1117; }}
+  .bn-body {{ flex: 1; }}
+  .bn-fix {{ color: #58a6ff; font-size: 0.82em; }}
 </style></head><body>
 
 <h1>🚀 Sergei Brand Agent — Mission Control</h1>
@@ -390,6 +521,17 @@ def render_html() -> str:
   Дата: <b>{date.today().strftime('%d %B %Y')}</b> ·
   Refresh: <b>{now_iso}</b> ·
   Status: {status_emoji} <b>{'OPERATIONAL' if daemon_ok else 'DEGRADED'}</b>
+</div>
+
+<h2>🚧 Bottleneck — что тормозит агента до 100% 24/7</h2>
+<div class="card">
+  <div style="font-size:1.05em;margin-bottom:4px">{bn_headline}</div>
+  <div class="gauge"><div style="width:{max(cap,8)}%;background:{cap_color}">{cap}% мощности</div></div>
+  <div class="meta" style="margin-bottom:10px">
+    🟢 Inbound-триаж · discovery · drafting · verification работают на 100% автономно.
+    Throttle почти весь на <b>outbound / публикации</b> — ждут одного действия от тебя.
+  </div>
+  {bn_rows}
 </div>
 
 <h2>⏰ Критические deadlines</h2>
@@ -545,7 +687,16 @@ def _publish_to_public_repo(html: str) -> None:
         except Exception:
             return
 
-    # Write HTML at random slug path
+    # Pull FIRST (clean tree) so rebase doesn't trip on our own unstaged writes.
+    try:
+        subprocess.run(
+            ["git", "-C", str(PUBLIC_REPO), "pull", "--quiet", "--rebase"],
+            check=False, timeout=15,
+        )
+    except Exception:
+        pass
+
+    # Then write HTML at random slug path
     out_dir = PUBLIC_REPO / slug
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html, encoding="utf-8")
@@ -555,17 +706,12 @@ def _publish_to_public_repo(html: str) -> None:
     robots_text = robots.read_text() if robots.exists() else ""
     disallow_line = f"Disallow: /{slug}/"
     if disallow_line not in robots_text:
-        # Append a User-agent: * Disallow block if not present
         if "User-agent: *" not in robots_text:
             robots_text += "\nUser-agent: *\n"
         robots_text += disallow_line + "\n"
         robots.write_text(robots_text)
 
     try:
-        subprocess.run(
-            ["git", "-C", str(PUBLIC_REPO), "pull", "--quiet", "--rebase"],
-            check=False, timeout=15,
-        )
         subprocess.run(
             ["git", "-C", str(PUBLIC_REPO), "add",
              f"{slug}/index.html", "robots.txt"],

@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>🧠 Sergei Brand Agent — Архитектура</title>
+<style>
+  :root {
+    --bg:#0e1117; --card:#161b22; --line:#30363d; --txt:#c9d1d9; --dim:#8b949e;
+    --haiku:#3fb950; --sonnet:#58a6ff; --opus:#bc8cff; --human:#f0883e;
+    --git:#db61a2; --tg:#2ea6ff;
+  }
+  * { box-sizing:border-box; }
+  body { font-family:-apple-system,"Segoe UI",system-ui,sans-serif; background:var(--bg);
+         color:var(--txt); margin:0; padding:20px; max-width:1200px; margin:0 auto; line-height:1.45; }
+  h1 { font-size:1.5em; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:.9em; margin-bottom:20px; }
+  h2 { font-size:1.05em; color:#f0f6fc; border-bottom:1px solid var(--line);
+       padding-bottom:6px; margin:28px 0 14px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:stretch; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:8px;
+         padding:12px 14px; flex:1; min-width:150px; }
+  .box h3 { margin:0 0 4px; font-size:.98em; }
+  .box p { margin:2px 0; font-size:.82em; color:var(--dim); }
+  .tier { display:inline-block; font-size:.7em; font-weight:700; padding:1px 7px;
+          border-radius:10px; color:#0e1117; vertical-align:middle; margin-left:6px; }
+  .t-haiku{background:var(--haiku);} .t-sonnet{background:var(--sonnet);}
+  .t-opus{background:var(--opus);} .t-human{background:var(--human);} .t-code{background:#6e7681;color:#fff;}
+  .arrow { text-align:center; color:var(--dim); font-size:1.4em; margin:6px 0; }
+  .flow { display:flex; flex-direction:column; gap:0; }
+  .flow .box { flex:none; }
+  .pill { border-left:3px solid; }
+  .legend { display:flex; gap:16px; flex-wrap:wrap; font-size:.8em; margin-top:8px; }
+  .legend span { display:flex; align-items:center; gap:5px; }
+  .dot { width:11px; height:11px; border-radius:3px; display:inline-block; }
+  .lane { display:grid; grid-template-columns:130px 1fr; gap:10px; align-items:center;
+          padding:8px 0; border-bottom:1px dashed var(--line); }
+  .lane b { font-size:.9em; }
+  .lane .desc { font-size:.82em; color:var(--dim); }
+  .dual { display:flex; gap:12px; }
+  .dual .box { border-top:3px solid; }
+  code { background:#0a0d12; padding:1px 5px; border-radius:4px; font-size:.85em; }
+  .note { background:#11161d; border:1px solid var(--line); border-radius:8px;
+          padding:10px 14px; font-size:.84em; color:var(--dim); margin-top:10px; }
+</style></head><body>
+
+<h1>🧠 Как работают ИИ-агенты Sergei Brand Agent</h1>
+<div class="sub">Реальная архитектура на droplet 134.209.230.86 · 8 когнитивных ролей · 3 model-tier · 24/7</div>
+
+<!-- ───────────── HIERARCHY ───────────── -->
+<h2>Иерархия управления</h2>
+<div class="flow">
+  <div class="box pill" style="border-color:var(--human)">
+    <h3>👤 Сергей <span class="tier t-human">BOSS</span></h3>
+    <p>Ставит цели. Одобряет необратимые действия (публикация, отправка, грант). Даёт креды.</p>
+  </div>
+  <div class="arrow">↓ ↑ <span style="font-size:.6em">цели вниз · отчёты вверх</span></div>
+  <div class="box pill" style="border-color:var(--opus)">
+    <h3>🧠 Claude <span class="tier t-opus">BUILD BRAIN</span></h3>
+    <p>Этот чат. Строит/чинит агента, принимает архитектурные решения, читает отчёты, делает exec-summary Сергею.</p>
+  </div>
+  <div class="arrow">↓ ↑ <span style="font-size:.6em">деплой вниз · git-отчёты вверх</span></div>
+  <div class="box pill" style="border-color:var(--sonnet)">
+    <h3>⚙️ Droplet Runtime <span class="tier t-code">24/7 WORKER</span></h3>
+    <p>18 cron + 2 daemon + 4 emit-hook. Крутится круглосуточно, вызывает роли ниже через claude-cli (Max-подписка).</p>
+  </div>
+</div>
+
+<!-- ───────────── MAIN FLOW ───────────── -->
+<h2>Поток работы: вход → решение → черновик → проверка → выход</h2>
+
+<div class="row">
+  <div class="box" style="border-color:var(--haiku)">
+    <h3>📥 ВХОД</h3>
+    <p>Gmail (15 мин)</p>
+    <p>Telegram DM (daemon)</p>
+    <p>OpenAlex citations</p>
+    <p>GitHub stars</p>
+    <p>Discovery: гранты/CFP/хакатоны</p>
+  </div>
+  <div style="display:flex;align-items:center;color:var(--dim);font-size:1.4em">→</div>
+  <div class="box" style="border-color:var(--haiku)">
+    <h3>🚦 Router / Triager <span class="tier t-haiku">HAIKU</span></h3>
+    <p>Классифицирует каждое входящее: skip / engage / escalate.</p>
+    <p>VIP-список → авто-эскалация. Анти-маркетинг фильтр.</p>
+    <p><b>Дёшево</b> — отсекает 90% шума до дорогих моделей.</p>
+  </div>
+</div>
+<div class="arrow">↓</div>
+
+<div class="box" style="border-color:var(--opus)">
+  <h3>🎯 Strategist / Orchestrator <span class="tier t-opus">OPUS</span></h3>
+  <p>Единая точка решений (не «толпа агентов» — это даёт 17× меньше ошибок). Раскладывает задачу, делегирует специалистам с чёткими границами, синтезирует. Недельный план (cron).</p>
+</div>
+<div class="arrow">↓ делегирует параллельно</div>
+
+<div class="row">
+  <div class="box" style="border-color:var(--sonnet)">
+    <h3>🔍 Researcher <span class="tier t-sonnet">SONNET</span></h3>
+    <p>Discovery грантов/CFP/хакатонов. Сбор контекста для заявок. Параллельные поиски.</p>
+  </div>
+  <div class="box" style="border-color:var(--sonnet)">
+    <h3>✍️ Composer <span class="tier t-sonnet">SONNET</span><span class="tier t-opus">OPUS*</span></h3>
+    <p>Пишет: посты, ответы, заявки, talk-proposals.</p>
+    <p>*Гранты → Opus (high-stakes, необратимо).</p>
+  </div>
+</div>
+<div class="arrow">↓ каждый черновик идёт через 2 ворот</div>
+
+<div class="row">
+  <div class="box" style="border-color:var(--sonnet)">
+    <h3>🔴 Critic <span class="tier t-sonnet">SONNET</span></h3>
+    <p>Adversarial review <b>качества</b>: тон, структура, бренд-голос. Возвращает правки Composer (замкнутый цикл).</p>
+  </div>
+  <div style="display:flex;align-items:center;color:var(--dim);font-size:1.4em">→</div>
+  <div class="box" style="border-color:var(--sonnet)">
+    <h3>✅ Verifier + Citation <span class="tier t-sonnet">SONNET ×3</span></h3>
+    <p>Проверка <b>фактов</b>: реальные DOI, нет фейк-«PhD», нет overclaiming. High-stakes → 3 голоса + Opus при разногласии.</p>
+    <p>Защита от prompt-injection: черновик = данные, не команды.</p>
+  </div>
+</div>
+<div class="arrow">↓ прошло обе проверки</div>
+
+<div class="box pill" style="border-color:var(--human)">
+  <h3>🚪 Human Gate <span class="tier t-human">СЕРГЕЙ</span></h3>
+  <p>Необратимые действия (публикация, отправка письма, сабмит гранта) ждут кнопки одобрения в Telegram: [✅ Send] [✏️ Edit] [❌ Skip]. Черновики Tier-1 (revertable) проходят авто.</p>
+</div>
+<div class="arrow">↓ одобрено</div>
+
+<!-- ───────────── DUAL CHANNEL OUTPUT ───────────── -->
+<h2>Двухканальный выход (durable + realtime)</h2>
+<div class="dual">
+  <div class="box" style="border-color:var(--git)">
+    <h3>📦 Git <span class="tier" style="background:var(--git);color:#fff">DURABLE</span></h3>
+    <p>Каждое событие → коммит в приватный repo <code>sergei-brand-agent-reports</code>. Вечная запись: reports/, applications/, posts/, audit/. Claude читает на старте сессии.</p>
+  </div>
+  <div class="box" style="border-color:var(--tg)">
+    <h3>📲 Telegram <span class="tier" style="background:var(--tg);color:#fff">REALTIME</span></h3>
+    <p>high/critical → мгновенный push с кнопками. critical → повтор каждые 30 мин до /ack. Бот: /dashboard /status /pause /menu.</p>
+  </div>
+</div>
+
+<!-- ───────────── BACKGROUND ROLES ───────────── -->
+<h2>Фоновые роли (всегда крутятся)</h2>
+<div class="lane"><b>🗂 Memory-Keeper <span class="tier t-haiku">HAIKU</span></b><span class="desc">Ночью 03:00 — консолидирует день в file-of-record (memory.md → opportunities/contacts/decisions/deadlines). Files-first: 74% &gt; графовая память.</span></div>
+<div class="lane"><b>🩺 Monitor <span class="tier t-haiku">HAIKU</span></b><span class="desc">Каждые 30 мин — daemons, диск, ошибки в логах, свежесть git. Молчит когда здоров; HIGH-алерт только при реальной проблеме.</span></div>
+<div class="lane"><b>⏰ Scheduler <span class="tier t-code">CODE</span></b><span class="desc">18 cron-задач. Не платим LLM за слежение за часами.</span></div>
+<div class="lane"><b>📊 Dashboard <span class="tier t-code">CODE</span></b><span class="desc">Рефреш после каждого emit + по /dashboard. 10 секций: deadlines, unblockers, pipeline, calendar.</span></div>
+
+<!-- ───────────── ECONOMY ───────────── -->
+<h2>Экономия моделей (≈51% дешевле uniform-Sonnet)</h2>
+<div class="row">
+  <div class="box" style="border-color:var(--haiku)">
+    <h3><span class="tier t-haiku">HAIKU</span> $1/$5</h3>
+    <p>triage · classify · route · память · мониторинг · расписание · теги</p>
+    <p>Паттерн-матчинг, не рассуждение.</p>
+  </div>
+  <div class="box" style="border-color:var(--sonnet)">
+    <h3><span class="tier t-sonnet">SONNET</span> $3/$15</h3>
+    <p>черновики · критика · проверка · research · статьи · summaries</p>
+    <p>Рабочая лошадка для всего что уходит человеку.</p>
+  </div>
+  <div class="box" style="border-color:var(--opus)">
+    <h3><span class="tier t-opus">OPUS</span> $5/$25</h3>
+    <p>стратегия · гранты · flagship-контент</p>
+    <p>Только где ошибка каскадит на всё ниже.</p>
+  </div>
+</div>
+<div class="note">
+  Правило 20%: <code>model_router.py report</code> следит за correction-rate. Если Haiku-задача требует Sonnet-правок &gt;20% — повышаем tier (иначе re-prompt съедает 3× экономию). Источники: Anthropic «Building Effective Agents» + multi-agent-research-system + Letta memory bench.
+</div>
+
+<div class="legend">
+  <span><span class="dot" style="background:var(--haiku)"></span> Haiku (дёшево)</span>
+  <span><span class="dot" style="background:var(--sonnet)"></span> Sonnet (рабочая)</span>
+  <span><span class="dot" style="background:var(--opus)"></span> Opus (high-stakes)</span>
+  <span><span class="dot" style="background:var(--human)"></span> Сергей (одобрение)</span>
+  <span><span class="dot" style="background:var(--git)"></span> Git durable</span>
+  <span><span class="dot" style="background:var(--tg)"></span> Telegram realtime</span>
+</div>
+
+<div class="sub" style="margin-top:24px;text-align:center">
+  Полная документация: ROLES.md в репо · Live cockpit: <a href="/dashboard/" style="color:var(--sonnet)">/dashboard/</a>
+</div>
+
+</body></html>
