@@ -44,6 +44,17 @@ KEYWORDS = [
     "prompt injection", "EVM bytecode", "AI agent finance",
     "MEV", "formal verification solidity",
 ]
+
+# Self-improvement: merge in keywords the retrospective learned from Sergei's
+# engagement (button clicks). Closes the loop — discovery gets smarter weekly.
+try:
+    _learned = json.loads(
+        Path("/opt/brand-agent/learned_keywords.json").read_text())
+    for _k in _learned.get("keywords", []):
+        if isinstance(_k, str) and _k not in KEYWORDS:
+            KEYWORDS.append(_k)
+except Exception:
+    pass
 # Opportunity trigger words (for HN + general)
 OPP_WORDS = ["grant", "hackathon", "bounty", "call for papers", "cfp",
              "hiring researcher", "research fellowship", "funding", "residency"]

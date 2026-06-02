@@ -151,9 +151,46 @@ def main():
     env = _load_env()
     soul = SOUL_PATH.read_text(encoding="utf-8") if SOUL_PATH.exists() else ""
 
-    # Daily pick — use date-seeded so each day picks different one
-    random.seed(datetime.utcnow().date().toordinal())
-    topic = random.choice(PREPRINT_TOPICS)
+    # Drain the Strategist's topic_queue first (founder-led narrative).
+    # Falls back to a date-seeded random preprint pick if the queue is empty.
+    topic = None
+    try:
+        import json as _json
+        from pathlib import Path as _P
+        tq_path = _P("/opt/brand-agent/topic_queue.json")
+        state = _P("/root/.openclaw/agent_state.sqlite")
+        if tq_path.exists():
+            tq = _json.loads(tq_path.read_text())
+            import sqlite3 as _sq
+            conn = _sq.connect(state)
+            conn.execute("CREATE TABLE IF NOT EXISTS topic_drained "
+                         "(title TEXT PRIMARY KEY, ts TEXT)")
+            for t in tq.get("topics", []):
+                title = t.get("title", "")
+                if not title:
+                    continue
+                done = conn.execute("SELECT 1 FROM topic_drained WHERE title=?",
+                                    (title,)).fetchone()
+                if done:
+                    continue
+                # Pull this topic; mark drained
+                conn.execute("INSERT OR REPLACE INTO topic_drained VALUES (?,?)",
+                             (title, datetime.now(timezone.utc).isoformat()))
+                conn.commit()
+                topic = {
+                    "title": title,
+                    "doi": t.get("ties_to", ""),
+                    "angle": t.get("angle", ""),
+                    "tag": t.get("channel", "linkedin"),
+                }
+                break
+            conn.close()
+    except Exception as e:
+        print(f"topic_queue drain failed ({e}), falling back to random")
+
+    if not topic:
+        random.seed(datetime.utcnow().date().toordinal())
+        topic = random.choice(PREPRINT_TOPICS)
     print(f"today's topic: {topic['title']}")
 
     post = _compose_post(topic, soul)
