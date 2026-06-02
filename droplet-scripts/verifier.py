@@ -40,6 +40,7 @@ VERIFIED FACTS about Sergei Solovev (use ONLY these for claims about his work):
   10.6084/m9.figshare.31859557 (Regime-Conditioning for LOB)
   10.6084/m9.figshare.31429971 (FinAgent)
   10.6084/m9.figshare.31430086 (Honest Prompt-Injection Detection)
+- ORCID iD: 0009-0008-4494-0447 (https://orcid.org/0009-0008-4494-0447)
 - Affiliation: HSE University, Faculty of Computer Science
 - Background: TradFi banking ops (Mosoblbank/PSB), ACI Russia board member
 - Website: sergeisolovev.com
