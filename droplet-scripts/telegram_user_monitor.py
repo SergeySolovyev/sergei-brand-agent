@@ -84,17 +84,33 @@ async def _on_new_message(event):
     chat = await event.get_chat()
     chat_title = getattr(chat, "title", None) or "(DM)"
     is_private = event.is_private
-
-    # Reduce noise: only act on private DMs OR mentions in groups/channels
     text = msg.text
-    sergei_handles = ["sergei", "solovev", "сергей", "соловьёв", "соловьев"]
-    is_mention = any(h.lower() in text.lower() for h in sergei_handles)
 
-    if not is_private and not is_mention:
+    # BRAND-FOCUS GATE (fixes the personal-chat noise flood).
+    # The old logic forwarded EVERY private DM + any message containing
+    # "Сергей" — so Sergei's personal life (logistics, friends, trading
+    # buddies, family) flooded Telegram as "mentions". Zero brand value.
+    #
+    # New rule: emit ONLY when triage ESCALATES — i.e. the sender is a VIP
+    # (vip_authors.json tier_S / russian_ecosystem_critical) OR the text
+    # contains a domain-critical term (Solovev in professional context, a
+    # figshare DOI, sergeisolovev.com, ai-yield-vault, honest-rag-solidity).
+    # Personal chatter never matches those, so it's dropped silently.
+    decision = triage.triage(sender_name, chat_title, text)
+    if decision.get("decision") != "escalate":
         return
 
-    decision = triage.triage(sender_name, chat_title, text)
-    if decision["decision"] == "skip":
+    # Whole-word safety: avoid emitting when "solovev"/"сергей" appears only
+    # as a casual first-name in a personal logistics message. Escalation
+    # already requires a VIP/domain match, so this is a belt-and-suspenders
+    # check that the matched signal is a real brand term, not just a name.
+    text_l = text.lower()
+    brand_terms = ["solovev", "соловьёв", "соловьев", "sergeisolovev.com",
+                   "figshare", "10.6084", "ai-yield-vault", "honest-rag",
+                   "orcid", "0009-0008-4494-0447"]
+    is_vip = "vip_sender" in (decision.get("tags") or [])
+    has_brand_term = any(t in text_l for t in brand_terms)
+    if not is_vip and not has_brand_term:
         return
 
     body = (

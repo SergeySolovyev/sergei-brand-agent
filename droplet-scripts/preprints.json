@@ -1,0 +1,61 @@
+{
+  "_meta": {
+    "purpose": "Authoritative source-of-truth for Sergei's preprints. Metadata pulled from DataCite API (figshare registers DOIs via DataCite). verifier/daily_commentary/grant_drafter MUST read titles from here — never hardcode, to avoid the FinAgent/prompt-injection mislabel bug.",
+    "source": "https://api.datacite.org/dois/<doi>",
+    "verified": "2026-06-01",
+    "author": "Solovev, Sergei",
+    "orcid": "0009-0008-4494-0447"
+  },
+  "preprints": [
+    {
+      "doi": "10.6084/m9.figshare.32141182",
+      "url": "https://doi.org/10.6084/m9.figshare.32141182",
+      "title": "When Retrieval Hurts: An Honest Evaluation of RAG for Solidity Vulnerability Detection",
+      "year": 2026,
+      "type": "preprint",
+      "publisher": "figshare",
+      "tag": "RAG smart-contract security",
+      "angle": "Honest evaluation showing where RAG retrieval HURTS vs helps in Solidity vulnerability detection"
+    },
+    {
+      "doi": "10.6084/m9.figshare.32141167",
+      "url": "https://doi.org/10.6084/m9.figshare.32141167",
+      "title": "AI-Managed ERC-4626 Yield Vault with Multi-Criteria Decision Making: Design, Implementation, and Formal Verification",
+      "year": 2026,
+      "type": "preprint",
+      "publisher": "figshare",
+      "tag": "DeFi",
+      "angle": "MCDM-driven strategy selection for ERC-4626 yield vaults with formal verification"
+    },
+    {
+      "doi": "10.6084/m9.figshare.31859557",
+      "url": "https://doi.org/10.6084/m9.figshare.31859557",
+      "title": "When Less Is More: Domain-Aware Dual-Branch Recurrent Networks for Limit Order Book Mid-Price Prediction",
+      "year": 2026,
+      "type": "preprint",
+      "publisher": "figshare",
+      "tag": "quant",
+      "angle": "Domain-aware dual-branch RNN beats larger models on LOB mid-price prediction"
+    },
+    {
+      "doi": "10.6084/m9.figshare.31429971",
+      "url": "https://doi.org/10.6084/m9.figshare.31429971",
+      "title": "Machine Learning-Based Vulnerability Detection in Ethereum Smart Contracts via EVM Bytecode Feature Engineering",
+      "year": 2026,
+      "type": "preprint",
+      "publisher": "figshare",
+      "tag": "smart-contract security",
+      "angle": "Bytecode-level feature engineering for ML vulnerability detection in EVM contracts"
+    },
+    {
+      "doi": "10.6084/m9.figshare.31430086",
+      "url": "https://doi.org/10.6084/m9.figshare.31430086",
+      "title": "OCR-Based vs. End-to-End Transformer Pipelines for Receipt Information Extraction: A Comparative Study on SROIE 2019",
+      "year": 2026,
+      "type": "preprint",
+      "publisher": "figshare",
+      "tag": "document AI",
+      "angle": "Comparing OCR-then-extract vs end-to-end transformer pipelines on SROIE 2019 receipts"
+    }
+  ]
+}

@@ -34,12 +34,13 @@ from model_router import run_llm, SONNET, OPUS  # noqa: E402
 # Anything the draft claims about Sergei's work must match these.
 GROUND_TRUTH = """
 VERIFIED FACTS about Sergei Solovev (use ONLY these for claims about his work):
-- 5 figshare preprints, DOIs:
-  10.6084/m9.figshare.32141182 (Honest-RAG-Solidity)
-  10.6084/m9.figshare.32141167 (AI-Yield-Vault)
-  10.6084/m9.figshare.31859557 (Regime-Conditioning for LOB)
-  10.6084/m9.figshare.31429971 (FinAgent)
-  10.6084/m9.figshare.31430086 (Honest Prompt-Injection Detection)
+- 5 figshare preprints, DOIs (CANONICAL titles from DataCite — verified 2026-06-01):
+  10.6084/m9.figshare.32141182 — When Retrieval Hurts: An Honest Evaluation of RAG for Solidity Vulnerability Detection
+  10.6084/m9.figshare.32141167 — AI-Managed ERC-4626 Yield Vault with Multi-Criteria Decision Making
+  10.6084/m9.figshare.31859557 — When Less Is More: Domain-Aware Dual-Branch Recurrent Networks for LOB Mid-Price Prediction
+  10.6084/m9.figshare.31429971 — Machine Learning-Based Vulnerability Detection in Ethereum Smart Contracts via EVM Bytecode Feature Engineering
+  10.6084/m9.figshare.31430086 — OCR-Based vs. End-to-End Transformer Pipelines for Receipt Information Extraction (SROIE 2019)
+  NOTE: there is NO "FinAgent" or "Honest Prompt-Injection" preprint — those were mislabels. FAIL any draft claiming them.
 - ORCID iD: 0009-0008-4494-0447 (https://orcid.org/0009-0008-4494-0447)
 - Affiliation: HSE University, Faculty of Computer Science
 - Background: TradFi banking ops (Mosoblbank/PSB), ACI Russia board member

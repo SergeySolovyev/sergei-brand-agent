@@ -91,29 +91,45 @@ def _contains_domain_term(text: str, vip: dict) -> str | None:
 def _cheap_llm_decision(subject: str, snippet: str, sender: str) -> dict | None:
     """Ask claude-cli (haiku) for a skip/engage call. Returns None on failure."""
     prompt = (
-        "You are triaging an inbound message for Sergei Solovev "
-        "(HSE FCS researcher, DeFi/AI, TradFi→AI→DeFi positioning).\n\n"
+        "You are triaging an inbound email for Sergei Solovev "
+        "(HSE FCS researcher, DeFi/AI, TradFi→AI→DeFi; lives in Moscow).\n\n"
         f"From: {sender}\n"
         f"Subject: {subject}\n"
-        f"Snippet: {snippet[:500]}\n\n"
-        "Decide: skip (spam/promo/noise) or engage (worth Sergei's attention).\n"
-        "If engage, classify severity: low/medium/high.\n"
-        'Respond with ONLY a JSON object: {"decision":"skip|engage","severity":"low|medium|high","reason":"<10 words>"}'
+        f"Snippet: {snippet[:600]}\n\n"
+        "Decide skip vs engage. ENGAGE (surface to Sergei) if the email is ANY of:\n"
+        "  • An opportunity: grant, CFP, hackathon, conference invite, job/collab, "
+        "speaking/interview/podcast request, citation of his work\n"
+        "  • Actionable & personal: a BILL or payment due, invoice, official/government "
+        "notice, tax, university/HSE admin, visa/document, account-security alert, "
+        "a real deadline, a reply from a real person who knows him\n"
+        "  • Anything where missing it has real consequences (money, deadline, relationship)\n"
+        "SKIP only if it is clearly promotional/newsletter/marketing/automated-digest "
+        "with no action needed.\n\n"
+        "Severity: high = money/deadline/official within days · medium = opportunity or "
+        "personal reply · low = mildly useful FYI.\n"
+        "HARD RULE: if severity is high or medium, decision MUST be engage (never skip "
+        "something important).\n\n"
+        'Respond with ONLY JSON: {"decision":"skip|engage","severity":"low|medium|high","reason":"<10 words>"}'
     )
     try:
         result = subprocess.run(
             ["claude", "-p", "--model", "claude-haiku-4-5", prompt],
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=25,
         )
         if result.returncode != 0:
             return None
-        # Extract first {...} from output
         m = re.search(r"\{[^{}]+\}", result.stdout)
         if not m:
             return None
-        return json.loads(m.group(0))
+        d = json.loads(m.group(0))
+        # Consistency guard: a high/medium-severity "skip" is a logic error
+        # (e.g. an insurance bill flagged high but marked skip). Promote to engage.
+        if d.get("decision") == "skip" and d.get("severity") in ("high", "medium"):
+            d["decision"] = "engage"
+            d["reason"] = "auto-promoted: " + d.get("reason", "important")
+        return d
     except Exception:
         return None
 

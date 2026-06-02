@@ -21,37 +21,38 @@ ENV_PATH = Path("/opt/brand-agent/.env")
 POSTS_DIR = Path("/opt/reports/posts")
 SOUL_PATH = Path("/opt/brand-agent/SOUL.md")
 
-# Sergei's 5 preprints with light context
+# Sergei's 5 preprints — CANONICAL metadata from DataCite (verified 2026-06-01).
+# Source of truth: /opt/brand-agent/knowledge_base/preprints.json
 PREPRINT_TOPICS = [
     {
         "doi": "10.6084/m9.figshare.32141182",
-        "title": "Honest-RAG-Solidity",
-        "angle": "RAG retrieval verification reduces hallucination in smart-contract vulnerability detection",
+        "title": "When Retrieval Hurts: An Honest Evaluation of RAG for Solidity Vulnerability Detection",
+        "angle": "An honest evaluation showing where RAG retrieval HURTS vs helps in Solidity vulnerability detection",
         "tag": "smart contract security",
     },
     {
         "doi": "10.6084/m9.figshare.32141167",
-        "title": "AI-Yield-Vault",
-        "angle": "ML-driven strategy selection for ERC-4626 yield vaults — balancing exploration vs exploitation",
+        "title": "AI-Managed ERC-4626 Yield Vault with Multi-Criteria Decision Making",
+        "angle": "MCDM-driven strategy selection for ERC-4626 yield vaults with formal verification",
         "tag": "DeFi",
     },
     {
         "doi": "10.6084/m9.figshare.31859557",
-        "title": "Regime-Conditioning for LOB",
-        "angle": "Market regime detection improves limit order book mid-price prediction",
+        "title": "When Less Is More: Domain-Aware Dual-Branch Recurrent Networks for LOB Mid-Price Prediction",
+        "angle": "A domain-aware dual-branch RNN beats larger models on limit order book mid-price prediction",
         "tag": "quant",
     },
     {
         "doi": "10.6084/m9.figshare.31429971",
-        "title": "FinAgent",
-        "angle": "Multi-agent architecture for systematic financial research",
-        "tag": "AI agents",
+        "title": "Machine Learning-Based Vulnerability Detection in Ethereum Smart Contracts via EVM Bytecode Feature Engineering",
+        "angle": "Bytecode-level feature engineering for ML vulnerability detection in EVM smart contracts",
+        "tag": "smart contract security",
     },
     {
         "doi": "10.6084/m9.figshare.31430086",
-        "title": "Honest Prompt-Injection Detection",
-        "angle": "Detecting prompt injection in RAG pipelines via retrieval consistency",
-        "tag": "LLM security",
+        "title": "OCR-Based vs. End-to-End Transformer Pipelines for Receipt Information Extraction (SROIE 2019)",
+        "angle": "Comparing OCR-then-extract vs end-to-end transformer pipelines on SROIE 2019 receipts",
+        "tag": "document AI",
     },
 ]
 

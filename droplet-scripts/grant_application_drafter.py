@@ -37,16 +37,17 @@ SOUL_PATH = Path("/opt/brand-agent/SOUL.md")
 IDENTITY_PATH = Path("/opt/brand-agent/knowledge_base/identity.json")
 
 # Sergei's preprint portfolio (used as track record in application)
+# CANONICAL titles from DataCite (verified 2026-06-01). Do NOT invent titles.
 PREPRINTS_SHORT = """
-1. Honest-RAG-Solidity — RAG-based vulnerability detection in smart contracts
+1. When Retrieval Hurts: An Honest Evaluation of RAG for Solidity Vulnerability Detection
    (DOI: 10.6084/m9.figshare.32141182)
-2. AI-Yield-Vault — ML strategy selection for ERC-4626 vaults
+2. AI-Managed ERC-4626 Yield Vault with Multi-Criteria Decision Making
    (DOI: 10.6084/m9.figshare.32141167)
-3. Regime-Conditioning for LOB Mid-Price Prediction
+3. When Less Is More: Domain-Aware Dual-Branch Recurrent Networks for LOB Mid-Price Prediction
    (DOI: 10.6084/m9.figshare.31859557)
-4. FinAgent — Multi-agent architecture for financial research
+4. Machine Learning-Based Vulnerability Detection in Ethereum Smart Contracts via EVM Bytecode Feature Engineering
    (DOI: 10.6084/m9.figshare.31429971)
-5. Honest Prompt-Injection Detection in RAG Pipelines
+5. OCR-Based vs. End-to-End Transformer Pipelines for Receipt Information Extraction (SROIE 2019)
    (DOI: 10.6084/m9.figshare.31430086)
 """
 
